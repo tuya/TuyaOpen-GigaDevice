@@ -1,0 +1,9 @@
+nuclei-gcc-v1.1-46-ge66e16cef6-dirty
+e66e16c enable bp multilib
+ 25654a9edf1530778f9fa86c5184d76961aa1624 qemu (v5.1.0-rc3-80-g25654a9edf)
+ 3d5125a0f7bfe3b3be3237a14cedfb9b941ec689 riscv-binutils (remotes/origin/nuclei-develop)
+ 4ea498a8e1fafeb568530d84db1880066478c86b riscv-dejagnu (heads/riscv-dejagnu-1.6)
+ f418eea298b799d730a4e264c6a951ee5a4b2d11 riscv-gcc (remotes/origin/nuclei-develop)
+ 3d5125a0f7bfe3b3be3237a14cedfb9b941ec689 riscv-gdb (remotes/origin/nuclei-develop)
+ 7395b0964db9cc4dd544926414960e9a16842180 riscv-glibc (remotes/origin/riscv-glibc-2.29)
+ 01f2bdf49da56bac1fdf359e53aeee018f9b08a0 riscv-newlib (newlib-4.1.0-12-g01f2bdf49)

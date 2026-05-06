@@ -1,0 +1,26 @@
+%rename link                ncrt_link
+%rename link_gcc_c_sequence ncrt_link_gcc_c_sequence
+%rename cpp                 ncrt_cpp
+%rename cc1                 ncrt_cc1
+%rename libgcc              ncrt_libgcc
+
+*cpp:
+-isystem=/include/libncrt %(ncrt_cpp)
+
+*cc1:
+-isystem=/include/libncrt %(ncrt_cc1)
+
+*ncrt_small:
+-lncrt_small
+
+*ncrt_libgcc:
+-lncrt_small
+
+*link_gcc_c_sequence:
+%(ncrt_link_gcc_c_sequence) --start-group %(ncrt_small) --end-group
+
+*link:
+%(ncrt_link) %:replace-outfile(-lc -lncrt_small) %:replace-outfile(-lm -lncrt_small)
+
+*lib:
+%{!shared:%{c*:-lncrt_small} %{!p:%{!pg:-lncrt_small}} %{p:-lncrt_small} %{pg:-lncrt_small}}
