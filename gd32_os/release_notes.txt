@@ -1,0 +1,51 @@
+==========================================
+Release Notes
+==========================================
+V1.0.3 (2025-10-22)
+1. Add support for BLE ATCMD. 
+2. Add support for ATCMD over SPI.
+3. Add support for Inactive Power Save when Wi-Fi is disconnected idle.
+4. Add support for RT-Thread OS.
+5. Add support for BLE DFU service.
+6. Add support for AWS cloud.
+7. Add support for BLE Mesh.
+8. Add support for WPS in MSDK configuration.
+9. Add support for WPA2/WPA3 Enterprise with EAP-TLS in MSDK configuration.
+10. FatFs supports QSPI flash.
+11. Update MbedTLS from 2.17.0 to 3.6.4.
+12. Update FreeRTOS from 10.3.1 to 10.5.1.
+13. Update LwIP from 2.1.2 to 2.2.0.
+14. Update FATFS from R0.14b to R0.15a.
+15. Update cJSON from 1.5.3 to 1.7.19.
+16. Update Libcoap from 4.3.4 to 4.3.5.
+17. Update zephyr BLE mesh from 3.6.0 to 4.2.0.
+18. Update wpa_supplicant from 2.10 to 2.11.
+19. Do not include iperf3 or ThreadX. If needed, please contact sales or FAE for access.
+
+==========================================
+Release Notes
+==========================================
+V1.0.2 (2024-07-17)
+1. Reduce SRAM memory usage about 20K bytes.
+2. Add support for more WiFi and BLE examples.
+3. Add support for Azure cloud.
+4. Add support for WPS in MSDK-FFD configuration.
+5. Add support for WPA2/WPA3 Enterprise with EAP-TLS in MSDK-FFD configuration.
+6. Add support for CoAP/FATFS demos.
+7. Add support for SEGGER IDE.
+8. Use different uart for cmd_shell and atcmd.
+9. Free SRAM used by BLE when BLE disabled.
+10.Add BLE tx power configurations in user setting.
+
+==========================================
+V1.0.1 (2024-03-01)
+1. Improve robustness of STA+SoftAP concurrent mode.
+2. Refine WiFi and BLE's stability in harsh environments.
+3. Improve compatibility with AP(test more than 200 APs).
+4. Add support for more BLE profiles.
+5. Add support for RTOS ThreadX.
+6. Update Alicloud to support living-link platform.
+
+==========================================
+V1.0.0 (2023-11-03)
+1. First release.

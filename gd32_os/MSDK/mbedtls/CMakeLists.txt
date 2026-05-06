@@ -1,0 +1,170 @@
+
+cmake_minimum_required(VERSION 3.15)
+
+add_library(mbedtls_api INTERFACE)
+
+add_library(mbedtls)
+
+if (CONFIG_MBEDTLS_VERSION STREQUAL "2.17.0")
+    target_sources(mbedtls
+        PRIVATE
+            mbedtls-2.17.0-ssl/library/debug.c
+            mbedtls-2.17.0-ssl/library/mbedtls_patch.c
+            mbedtls-2.17.0-ssl/library/net_sockets.c
+            mbedtls-2.17.0-ssl/library/ssl_cache.c
+            mbedtls-2.17.0-ssl/library/ssl_ciphersuites.c
+            mbedtls-2.17.0-ssl/library/ssl_cli.c
+            mbedtls-2.17.0-ssl/library/ssl_cookie.c
+            mbedtls-2.17.0-ssl/library/ssl_default_conf.c
+            mbedtls-2.17.0-ssl/library/ssl_srv.c
+            mbedtls-2.17.0-ssl/library/ssl_ticket.c
+            mbedtls-2.17.0-ssl/library/ssl_tls.c
+            mbedtls-2.17.0-ssl/library/version.c
+            demo/ssl_client.c
+            demo/ssl_certs.c
+    )
+
+
+    target_include_directories(mbedtls_api
+        INTERFACE
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/mbedtls-2.17.0-ssl/include>
+    )
+
+else ()
+    target_sources(mbedtls
+        PRIVATE
+            mbedtls/library/aes_alt.c
+            mbedtls/library/aes.c
+            mbedtls/library/aesce.c
+            mbedtls/library/aesni.c
+            mbedtls/library/aria.c
+            mbedtls/library/asn1parse.c
+            mbedtls/library/asn1write.c
+            mbedtls/library/base64.c
+            mbedtls/library/bignum_core.c
+            mbedtls/library/bignum_mod_raw.c
+            mbedtls/library/bignum_mod.c
+            mbedtls/library/bignum.c
+            mbedtls/library/block_cipher.c
+            mbedtls/library/camellia.c
+            mbedtls/library/ccm.c
+            mbedtls/library/chacha20.c
+            mbedtls/library/chachapoly.c
+            mbedtls/library/cipher_wrap.c
+            mbedtls/library/cipher.c
+            mbedtls/library/cmac.c
+            mbedtls/library/constant_time.c
+            mbedtls/library/ctr_drbg.c
+            mbedtls/library/debug.c
+            mbedtls/library/des_alt.c
+            mbedtls/library/des.c
+            mbedtls/library/dhm.c
+            mbedtls/library/ecdh.c
+            mbedtls/library/ecdsa.c
+            mbedtls/library/ecjpake.c
+            mbedtls/library/ecp_curves_new.c
+            mbedtls/library/ecp_curves.c
+            mbedtls/library/ecp.c
+            mbedtls/library/entropy_poll.c
+            mbedtls/library/entropy.c
+            mbedtls/library/error.c
+            mbedtls/library/gcm.c
+            mbedtls/library/hkdf.c
+            mbedtls/library/hmac_drbg.c
+            mbedtls/library/lmots.c
+            mbedtls/library/lms.c
+            mbedtls/library/md.c
+            mbedtls/library/md5.c
+            mbedtls/library/memory_buffer_alloc.c
+            mbedtls/library/mps_reader.c
+            mbedtls/library/mps_trace.c
+            mbedtls/library/net_sockets.c
+            mbedtls/library/nist_kw.c
+            mbedtls/library/oid.c
+            mbedtls/library/padlock.c
+            mbedtls/library/pem.c
+            mbedtls/library/pk_ecc.c
+            mbedtls/library/pk_wrap.c
+            mbedtls/library/pk.c
+            mbedtls/library/pkcs12.c
+            mbedtls/library/pkcs5.c
+            mbedtls/library/pkcs7.c
+            mbedtls/library/pkparse.c
+            mbedtls/library/pkwrite.c
+            mbedtls/library/platform_util.c
+            mbedtls/library/platform.c
+            mbedtls/library/poly1305.c
+            mbedtls/library/psa_crypto_aead.c
+            mbedtls/library/psa_crypto_cipher.c
+            mbedtls/library/psa_crypto_client.c
+            mbedtls/library/psa_crypto_driver_wrappers_no_static.c
+            mbedtls/library/psa_crypto_ecp.c
+            mbedtls/library/psa_crypto_ffdh.c
+            mbedtls/library/psa_crypto_hash.c
+            mbedtls/library/psa_crypto_mac.c
+            mbedtls/library/psa_crypto_pake.c
+            mbedtls/library/psa_crypto_rsa.c
+            mbedtls/library/psa_crypto_se.c
+            mbedtls/library/psa_crypto_slot_management.c
+            mbedtls/library/psa_crypto_storage.c
+            mbedtls/library/psa_crypto.c
+            mbedtls/library/psa_its_file.c
+            mbedtls/library/psa_util.c
+            mbedtls/library/ripemd160.c
+            mbedtls/library/rsa_alt_helpers.c
+            mbedtls/library/rsa.c
+            mbedtls/library/sha1.c
+            mbedtls/library/sha256_alt.c
+            mbedtls/library/sha256.c
+            mbedtls/library/sha3.c
+            mbedtls/library/sha512.c
+            mbedtls/library/ssl_cache.c
+            mbedtls/library/ssl_ciphersuites.c
+            mbedtls/library/ssl_client.c
+            mbedtls/library/ssl_cookie.c
+            mbedtls/library/ssl_debug_helpers_generated.c
+            mbedtls/library/ssl_msg.c
+            mbedtls/library/ssl_ticket.c
+            mbedtls/library/ssl_tls.c
+            mbedtls/library/ssl_tls12_client.c
+            mbedtls/library/ssl_tls12_server.c
+            mbedtls/library/ssl_tls13_client.c
+            mbedtls/library/ssl_tls13_generic.c
+            mbedtls/library/ssl_tls13_keys.c
+            mbedtls/library/ssl_tls13_server.c
+            mbedtls/library/threading.c
+            mbedtls/library/timing.c
+            mbedtls/library/version_features.c
+            mbedtls/library/version.c
+            mbedtls/library/x509_create.c
+            mbedtls/library/x509_crl.c
+            mbedtls/library/x509_crt.c
+            mbedtls/library/x509_csr.c
+            mbedtls/library/x509.c
+            mbedtls/library/x509write_crt.c
+            mbedtls/library/x509write_csr.c
+            mbedtls/library/x509write.c
+            # mbedtls/programs/test/selftest.c
+            demo/ssl_client.c
+            demo/ssl_certs.c
+    )
+
+
+    target_include_directories(mbedtls_api
+        INTERFACE
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/mbedtls/include>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/mbedtls/library>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/mbedtls/tests/include/spe>
+    )
+endif()
+
+target_link_libraries(mbedtls
+    mbedtls_api
+    lwIP_api
+    riscv_api
+    rtos_api
+    bsp_api
+)
+
+add_lib_api(mbedtls_api)
+add_lib(mbedtls)

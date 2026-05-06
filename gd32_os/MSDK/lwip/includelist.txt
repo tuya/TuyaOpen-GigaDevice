@@ -1,0 +1,7 @@
+# Include path
+   lwip-STABLE-2_0_2_RELEASE_VER/src/include
+   lwip-STABLE-2_0_2_RELEASE_VER/src/include/posix
+   lwip-STABLE-2_0_2_RELEASE_VER/ports/Ceva-WiFi/include
+   net_al
+
+
