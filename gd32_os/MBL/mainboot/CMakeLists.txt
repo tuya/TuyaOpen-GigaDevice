@@ -72,15 +72,18 @@ target_link_options(${TARGET_EXE}
     -Wl,-Map=${TARGET_PROJECT_DIR}/cmake/bin/${TARGET_EXE}.map
 )
 
+# Full path prefix (e.g. .../gcc/bin/riscv-nuclei-elf-) so mbl_afterbuild.{bat,sh} finds objcopy/objdump without PATH (matches MSDK image_* scripts).
+set(_GD32_MBL_TOOL_PREFIX "${TOOLCHAIN_DIR}/bin/${CROSS_COMPILE}-")
+
 if(${CMAKE_HOST_WIN32})
     add_custom_command(TARGET ${TARGET_EXE} POST_BUILD
-        COMMAND ${TARGET_PROJECT_DIR}/mbl_afterbuild.bat ${CROSS_COMPILE}- ${PROJECT_SOURCE_DIR} ECDSA256 CERT ${OPENOCD_DIR} 00ffeeddccbbaa998877665544332211
+        COMMAND ${TARGET_PROJECT_DIR}/mbl_afterbuild.bat ${_GD32_MBL_TOOL_PREFIX} ${PROJECT_SOURCE_DIR} ECDSA256 CERT ${OPENOCD_DIR} 00ffeeddccbbaa998877665544332211
         WORKING_DIRECTORY "${TARGET_PROJECT_DIR}/cmake/bin"
         COMMENT "Building ${TARGET_EXE}"
     )
 elseif(${CMAKE_HOST_UNIX})
     add_custom_command(TARGET ${TARGET_EXE} POST_BUILD
-        COMMAND cd ${TARGET_PROJECT_DIR}/cmake/bin && ../../mbl_afterbuild.sh ${CROSS_COMPILE}- ${PROJECT_SOURCE_DIR} ECDSA256 CERT ${OPENOCD_DIR} 00ffeeddccbbaa998877665544332211
+        COMMAND cd ${TARGET_PROJECT_DIR}/cmake/bin && ../../mbl_afterbuild.sh ${_GD32_MBL_TOOL_PREFIX} ${PROJECT_SOURCE_DIR} ECDSA256 CERT ${OPENOCD_DIR} 00ffeeddccbbaa998877665544332211
         COMMENT "Building ${TARGET_EXE}"
     )
 else()
