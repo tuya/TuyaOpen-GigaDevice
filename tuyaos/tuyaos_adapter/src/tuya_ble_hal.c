@@ -2420,6 +2420,7 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
             }
 
             if (p_cur_char->property & TKL_BLE_GATT_CHAR_PROP_WRITE) {
+                p_srv_table[total_handle].ext_info = 1024; // workaround for ios MTU size
                 p_srv_table[total_handle].info |= PROP(WR);
             }
 
