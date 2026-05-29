@@ -57,6 +57,7 @@ OF SUCH DAMAGE.
 #include "tuya_ble_hal.h"
 #include "ble_sec.h"
 #include "gd32vw55x_platform.h"
+#include "raw_flash_api.h"
 
 /*
  * DEFINES
@@ -2211,6 +2212,8 @@ OPERATE_RET tuya_hal_init(uint8_t role)
              : OPRT_OS_ADAPTER_BLE_INIT_FAILED;
 }
 
+extern void ble_flash_erase_handler(raw_erase_type_t type);
+
 void tuya_adp_init(uint8_t role)
 {
     ble_init_param_t param = {0};
@@ -2298,6 +2301,8 @@ void tuya_adp_init(uint8_t role)
     /* The BLE interrupt must be enabled after ble_sw_init. */
     ble_irq_enable();
 
+    /* ble need to close deep sleep before flash erase */
+    raw_flash_erase_handler_register(ble_flash_erase_handler);
     return;
 }
 
@@ -2357,6 +2362,8 @@ void tuya_adp_deinit(void)
     /* Shut down BLE stack, hardware and interrupt */
     ble_power_off();
     ble_irq_disable();
+
+    raw_flash_erase_handler_unregister(ble_flash_erase_handler);
 
     /* Release ready semaphore */
     sys_sema_free(&tuya_ble_sema);
@@ -2738,7 +2745,7 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
             }
 
             sys_memcpy(p_srv_table[total_handle].uuid, p_cur_char->char_uuid.uuid.uuid128, BLE_GATT_UUID_128_LEN);
-            p_srv_table[total_handle].ext_info = p_cur_char->value_len;
+            p_srv_table[total_handle].ext_info = 512; // p_cur_char->value_len;
 
             if (p_cur_char->property & TKL_BLE_GATT_CHAR_PROP_BROADCAST) {
                 p_srv_table[total_handle].info |= PROP(BC);
@@ -2785,7 +2792,7 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
             }
 
             if (p_info != NULL) {
-                p_info->attr_handle_tuple[j] = (p_cur_char->handle << 16) | p_cur_char->value_len;
+                p_info->attr_handle_tuple[j] = (p_cur_char->handle << 16) | 512; //p_cur_char->value_len;
             }
 
             total_handle++;
