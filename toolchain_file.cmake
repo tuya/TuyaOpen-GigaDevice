@@ -21,7 +21,7 @@ if(NOT DEFINED PLATFORM_PATH OR "${PLATFORM_PATH}" STREQUAL "")
     set(PLATFORM_PATH "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "GD32 platform root (directory containing toolchain_file.cmake)")
 endif()
 
-set(TOOLCHAIN_DIR "${PLATFORM_PATH}/prebuilt/nuclei_riscv_newlibc_prebuilt_win32_2022.04/gcc" CACHE PATH "RISC-V Nuclei GCC toolchain root")
+set(TOOLCHAIN_DIR "${PLATFORM_PATH}/../tools/nuclei_riscv_newlibc_prebuilt_win32_2022.04/gcc" CACHE PATH "RISC-V Nuclei GCC toolchain root")
 set(CROSS_COMPILE riscv-nuclei-elf)
 set(TOOLCHAIN_PRE "${CROSS_COMPILE}-")
 

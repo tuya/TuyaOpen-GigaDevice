@@ -10,7 +10,6 @@
  */
 
 // --- BEGIN: user defines and implements ---
-#include <stdio.h>
 #include "wrapper_os.h"
 #include "tkl_memory.h"
 #include "tuya_error_code.h"
@@ -32,12 +31,8 @@ void *tkl_system_malloc(size_t size)
         return NULL;
 
     void *ptr = sys_malloc(size);
-    if(NULL == ptr) {
-        printf("tkl_system_malloc failed, size(%d)!\r\n", size);
-    }
 
     return ptr;
-
     // --- END: user implements ---
 }
 

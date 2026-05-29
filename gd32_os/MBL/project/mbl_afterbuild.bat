@@ -43,6 +43,10 @@ chcp 65001
 set ALGO_HASH=SHA256
 set TARGET=mbl
 
+if exist "%OPENOCD_PATH%\bin\%TOOLKIT%objcopy.exe" (
+    set TOOLKIT=%OPENOCD_PATH%\bin\%TOOLKIT%
+)
+
 if not '%ALGO_SIGN%' == 'ECDSA256' if not '%ALGO_SIGN%' == 'ED25519' (
     echo ALGO_SIGN must be 'ECDSA256' or 'ED25519'!
     goto end

@@ -56,6 +56,7 @@ OF SUCH DAMAGE.
 #else
 #if PLATFORM_CRYSTAL == CRYSTAL_40M
 #define __SYSTEM_CLOCK_160M_PLLDIG_40M_HXTAL        (uint32_t)(160000000)
+// #define __SYSTEM_CLOCK_80M_PLLDIG_40M_HXTAL        (uint32_t)(80000000)
 #elif PLATFORM_CRYSTAL == CRYSTAL_26M
 #define __SYSTEM_CLOCK_160M_PLLDIG_26M_HXTAL        (uint32_t)(160000000)
 #elif PLATFORM_CRYSTAL == CRYSTAL_48M
@@ -66,6 +67,7 @@ OF SUCH DAMAGE.
 
 #ifdef CONFIG_RF_TEST_SUPPORT
 #undef __SYSTEM_CLOCK_160M_PLLDIG_40M_HXTAL
+#undef __SYSTEM_CLOCK_80M_PLLDIG_40M_HXTAL
 #define __SYSTEM_CLOCK_40M_PLLDIG_40M_HXTAL         (uint32_t)(40000000)
 #endif
 
@@ -97,6 +99,9 @@ static void system_clock_160m_hxtal(void);
 #elif defined (__SYSTEM_CLOCK_160M_PLLDIG_40M_HXTAL)
 uint32_t SystemCoreClock = __SYSTEM_CLOCK_160M_PLLDIG_40M_HXTAL;
 static void system_clock_160m_40m_hxtal(void);
+#elif defined (__SYSTEM_CLOCK_80M_PLLDIG_40M_HXTAL)
+uint32_t SystemCoreClock = __SYSTEM_CLOCK_80M_PLLDIG_40M_HXTAL;
+static void system_clock_80m_40m_hxtal(void);
 #elif defined (__SYSTEM_CLOCK_160M_PLLDIG_26M_HXTAL)
 uint32_t SystemCoreClock = __SYSTEM_CLOCK_160M_PLLDIG_26M_HXTAL;
 static void system_clock_160m_26m_hxtal(void);
@@ -173,6 +178,8 @@ void system_clock_config(void)
     system_clock_48m_hxtal();
 #elif defined (__SYSTEM_CLOCK_160M_PLLDIG_40M_HXTAL)
     system_clock_160m_40m_hxtal();
+#elif defined (__SYSTEM_CLOCK_80M_PLLDIG_40M_HXTAL)
+    system_clock_80m_40m_hxtal();
 #elif defined (__SYSTEM_CLOCK_160M_PLLDIG_26M_HXTAL)
     system_clock_160m_26m_hxtal();
 #elif defined (__SYSTEM_CLOCK_160M_PLLDIG_48M_HXTAL)
@@ -590,6 +597,78 @@ static void system_clock_160m_40m_hxtal(void)
     RCU_PLLDIGCFG0 |= ( RCU_PLLDIG_480M );
     /* SYS clock = 160M */
     RCU_PLLDIGCFG0 |= ( RCU_PLLDIG_SYS_DIV3 );
+
+    /* enable PLL */
+    RCU_CFG1 |= (RCU_CFG1_RFPLLCALEN | RCU_CFG1_BGPU);
+    RCU_CTL |= (RCU_CTL_PLLDIGEN | RCU_CTL_PLLDIGPU);
+    /* wait until PLL is stable */
+    while(0U == (RCU_CTL & RCU_CTL_PLLDIGSTB)){
+    }
+    /* select PLL as system clock */
+    RCU_CFG0 &= ~RCU_CFG0_SCS;
+    RCU_CFG0 |= RCU_CKSYSSRC_PLLDIG;
+
+    /* wait until PLL is selected as system clock */
+    while(RCU_SCSS_PLLDIG != (RCU_CFG0 & RCU_CFG0_SCSS)){
+    }
+}
+#elif defined (__SYSTEM_CLOCK_80M_PLLDIG_40M_HXTAL)
+/*!
+    \brief      configure the system clock to 80M by PLL which selects HXTAL(40M) as its clock source
+    \param[in]  none
+    \param[out] none
+    \retval     none
+*/
+static void system_clock_80m_40m_hxtal(void)
+{
+#if 0
+    uint32_t stab_flag = 0U;
+    uint32_t timeout = 0U;
+#endif
+    /* power up HXTAL */
+    RCU_CTL |= RCU_CTL_HXTALPU;
+    /* enable HXTAL */
+    RCU_CTL |= RCU_CTL_HXTALEN;
+
+    /*
+     * HW team said that waiting HXTAL stable is not necessary to wait.
+     * But it's best to wait it for safety.
+     * We hope to setup HSE as fastly for LPDS, we mark it do more test.
+     */
+#if 0
+    HXTALSTB_DELAY
+
+    /* wait until HXTAL is stable or the startup time is longer than HXTAL_STARTUP_TIMEOUT */
+    do{
+        timeout++;
+        stab_flag = (RCU_CTL & RCU_CTL_HXTALSTB);
+    }while((0U == stab_flag) && (HXTAL_STARTUP_TIMEOUT != timeout));
+
+    /* if fail */
+    if(0U == (RCU_CTL & RCU_CTL_HXTALSTB)){
+        while(1){
+        }
+    }
+#endif
+
+    RCU_CTL |= RCU_CTL_HXTALREADY;
+
+    /* HXTAL is stable */
+    /* AHB = SYSCLK */
+    RCU_CFG0 |= RCU_AHB_CKSYS_DIV1;
+    /* APB2 = AHB */
+    RCU_CFG0 |= RCU_APB2_CKAHB_DIV1;
+    /* APB1 = AHB/2 */
+    RCU_CFG0 |= RCU_APB1_CKAHB_DIV2;
+
+    RCU_PLL |= RCU_PLLSRC_HXTAL;
+
+    /* PLLDIG = 960/HSE */
+    RCU_PLLDIGCFG1 = ((960 << 21) / (HXTAL_VALUE/1000000)) & 0x7FFFFFFF;
+    /* PLLDIG OUT = 480M */
+    RCU_PLLDIGCFG0 |= ( RCU_PLLDIG_480M );
+    /* SYS clock = 160M */
+    RCU_PLLDIGCFG0 |= ( RCU_PLLDIG_SYS_DIV6 );
 
     /* enable PLL */
     RCU_CFG1 |= (RCU_CFG1_RFPLLCALEN | RCU_CFG1_BGPU);

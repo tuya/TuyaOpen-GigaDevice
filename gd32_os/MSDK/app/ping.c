@@ -32,7 +32,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 OF SUCH DAMAGE.
 */
 
-#include "app_cfg.h"
+#include <app_cfg.h>
 #include "lwip/opt.h"
 #if LWIP_PING
 #include "lwip/mem.h"

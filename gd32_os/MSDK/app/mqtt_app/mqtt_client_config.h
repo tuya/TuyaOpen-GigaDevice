@@ -49,14 +49,20 @@ void mqtt_receive_msg_print(void *inpub_arg, const uint8_t *data, uint16_t paylo
 void mqtt_receive_pub_msg_print(void *inpub_arg, const char *data, uint16_t payload_length);
 void mqtt_connect_callback(mqtt_client_t *client, void *arg, mqtt_connection_status_t status);
 struct mqtt_connect_client_info_t* get_client_param_data_get(void);
-void client_user_info_free(void);
-void client_will_info_free(void);
-int mqtt_client_id_set(char *new_client_id, int16_t len);
-int mqtt_client_user_set(char *new_client_user, int16_t len);
-int mqtt_client_pass_set(char *new_client_pass, int16_t len);
-int mqtt_client_conn_set(u16_t new_keep_alive, u8_t new_clean_session_disabled, char *new_will_topic, char *new_will_msg, u8_t new_will_qos, u8_t new_will_retain);
-char *mqtt_client_id_get(void);
-void mqtt_client_info_init(void);
+mqtt_client_context_t* mqtt_client_context_init(void);
+int mqtt_client_id_set(mqtt_client_context_t *mqtt_ctx, char *new_client_id, int16_t len);
+int mqtt_client_user_set(mqtt_client_context_t *mqtt_ctx, char *new_client_user, int16_t len);
+int mqtt_client_pass_set(mqtt_client_context_t *mqtt_ctx, char *new_client_pass, int16_t len);
+int mqtt_client_conn_set(mqtt_client_context_t *mqtt_ctx, u16_t new_keep_alive, u8_t new_clean_session_disabled, char *new_will_topic, char *new_will_msg, u8_t new_will_qos, u8_t new_will_retain);
+int mqtt_host_set(mqtt_client_context_t *mqtt_ctx, char *host, int16_t len);
+int mqtt_ssl_cfg(mqtt_client_context_t *mqtt_ctx);
+char *mqtt_client_id_get(mqtt_client_context_t *mqtt_ctx);
+void client_user_info_free(mqtt_client_context_t *mqtt_ctx);
+void client_will_info_free(mqtt_client_context_t *mqtt_ctx);
+void mqtt_host_free(mqtt_client_context_t *mqtt_ctx);
+void mqtt_resource_free(mqtt_client_context_t *mqtt_ctx);
+void mqtt_info_free(mqtt_client_context_t *mqtt_ctx);
+void mqtt_context_free(mqtt_client_context_t **mqtt_ctx);
 
 #endif // CONFIG_MQTT
 

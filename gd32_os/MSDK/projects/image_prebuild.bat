@@ -34,7 +34,16 @@ chcp 65001
 set TOOLKIT=%1
 set MSDK_DIR=%2
 set MSDK_DIR=%MSDK_DIR:/=\%
+set TOOLCHAIN_DIR=%3
+set TOOLCHAIN_DIR=%TOOLCHAIN_DIR:/=\%
 set MATTER=%4
+
+:: When invoked from CMake, resolve full path prefix for gcc so it works without PATH.
+if defined TOOLCHAIN_DIR (
+    if exist "%TOOLCHAIN_DIR%\bin\%TOOLKIT%gcc.exe" (
+        set TOOLKIT=%TOOLCHAIN_DIR%\bin\%TOOLKIT%
+    )
+)
 
 ::set MSDK_DIR=..\\..\\..\\..
 set SCONS_CONFIG=%MSDK_DIR%\macsw\export\wlan_config.h
@@ -66,8 +75,6 @@ if "%cfg_ble_lib_max%" == "0" (
                 "%MSDK_DIR%\\blesw\\src\\export\\ble_config.h"
     )
 )
-
-echo cd=%cd%
 
 :: generate gd32vw55x.lds
 if "%TOOLKIT%" neq "IAR" (

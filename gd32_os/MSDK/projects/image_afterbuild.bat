@@ -41,6 +41,10 @@ set ROOT=%ROOT:/=\%
 set AESK=%6
 set TARGET=%7
 
+if exist "%OPENOCD_PATH%\bin\%TOOLKIT%objcopy.exe" (
+    set TOOLKIT=%OPENOCD_PATH%\bin\%TOOLKIT%
+)
+
 set ALGO_HASH=SHA256
 
 if not '%ALGO_SIGN%' == 'ECDSA256' if not '%ALGO_SIGN%' == 'ED25519' (
@@ -59,7 +63,7 @@ if "%AESK%" NEQ "" (
 ) else (
     set AES_SUFFIX=
 )
-echo %AESK%
+@REM echo %AESK%
 
 set MBL_KEY=%ROOT%\scripts\certs\%ALGO_SIGN%\mbl-key.pem
 set ROTPK=%ROOT%\scripts\certs\%ALGO_SIGN%\rot-key.pem
@@ -76,7 +80,6 @@ set DOWNLOAD_BIN=%OUTPUT_PATH%\image-ota-sign%AES_SUFFIX%.bin
 echo "%TARGET%.elf"
 %TOOLKIT%objcopy -O binary -j ".log" "%TARGET%.elf" "trace.bin"
 :: %TOOLKIT%objcopy -R ".log" "%TARGET%.elf" "%TARGET%.elf"
-
 
 if "%TOOLKIT%" neq "IAR" (
     %TOOLKIT%objdump -S -l -d %TARGET%.elf > %TARGET%.dump
@@ -109,7 +112,7 @@ for /f "tokens=1,2,3" %%i in ( %ROOT%\MSDK\app\rftest_cfg.h ) do (
         set /a rftest_on=1
     )
 )
-echo rftest_on=%rftest_on%
+@REM echo rftest_on=%rftest_on%
 set cur_dir=%CD%
 cd %OUTPUT_PATH%
 set /A mbl_len=0
@@ -126,13 +129,13 @@ if exist rftest.bin (
     )
 )
 set /A rftest_end=0xA000+%rftest_len%
-echo rftest_end = %rftest_end%
+@REM echo rftest_end = %rftest_end%
 cd %cur_dir%
 
 :: Check if need python to add sysset\mbl_header\mbl_tailer
 :: if mbl_offset is equal to 0, which means boot from MBL directly (not from ROM)
 if "%mbl_offset%" == "0x0"  (
-    echo "Not add image header and tailer!"
+    @REM echo "Not add image header and tailer!"
     if %rftest_on% == 1 (
         copy %TARGET%.bin "%OUTPUT_PATH%\\rftest.bin"
         set DOWNLOAD_BIN="%OUTPUT_PATH%\\rftest.bin"
@@ -158,7 +161,7 @@ if "%mbl_offset%" == "0x0"  (
         echo image-all-mp.bin generated!
     )
 
-    echo Goto download!
+    @REM echo Goto download!
     goto download
 )
 if "%mbl_offset%" == "0x1000"  (
@@ -216,10 +219,10 @@ set OPENOCD="%OPENOCD_PATH%\\openocd.exe"
 set LINKCFG="%cur_dir%\\..\\openocd_gdlink.cfg"
 ::set LINKCFG="%cur_dir%\\..\\openocd_jlink.cfg"
 
-echo "Download OTA image use the follow command: "
-echo %OPENOCD% -f %LINKCFG% -c \"program %DOWNLOAD_BIN% 0x0800A000 verify reset exit;\"
-echo "Or download ALL image:"
-echo "%OPENOCD%  -f %LINKCFG% -c \"program %OUTPUT_PATH%image-all.bin 0x08000000 verify exit;\"
+@REM echo "Download OTA image use the follow command: "
+@REM echo %OPENOCD% -f %LINKCFG% -c \"program %DOWNLOAD_BIN% 0x0800A000 verify reset exit;\"
+@REM echo "Or download ALL image:"
+@REM echo "%OPENOCD%  -f %LINKCFG% -c \"program %OUTPUT_PATH%image-all.bin 0x08000000 verify exit;\"
 @echo on
 ::%OPENOCD% -f %LINKCFG% -c "program %DOWNLOAD_BIN% 0x0800A000 verify reset exit;"
 :end

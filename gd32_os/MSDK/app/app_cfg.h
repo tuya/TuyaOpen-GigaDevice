@@ -59,7 +59,7 @@ OF SUCH DAMAGE.
 #define IPERF_TASK_MAX              2
 #endif
 
-// #define CONFIG_BASECMD
+#define CONFIG_BASECMD
 
 // #define CONFIG_SPI_I2S
 // #define CONFIG_SOFTAP_PROVISIONING
@@ -96,14 +96,6 @@ OF SUCH DAMAGE.
 
 #define CONFIG_ATCMD
 #define CONFIG_MQTT
-#endif
-
-// #define CONFIG_MP3_PLAY_ENABLE
-#ifdef CONFIG_MP3_PLAY_ENABLE
-    #undef CONFIG_FATFS_SUPPORT
-    #define CONFIG_FATFS_SUPPORT
-    #undef CONFIG_SPI_I2S
-    #define CONFIG_SPI_I2S
 #endif
 
 // #define CONFIG_SPI_I2S

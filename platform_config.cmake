@@ -18,9 +18,8 @@ set(PLATFORM_PUBINC_2
     ${PLATFORM_PATH}/gd32_os/MSDK/plf/GD32VW55x_standard_peripheral
     ${PLATFORM_PATH}/gd32_os/MSDK/plf/GD32VW55x_standard_peripheral/Include
     ${PLATFORM_PATH}/gd32_os/MSDK/rtos/rtos_wrapper
-    ${PLATFORM_PATH}/gd32_os/MSDK/app/play_music/mp3
-    ${PLATFORM_PATH}/gd32_os/MSDK/app/play_music/codec_driver
     ${PLATFORM_PATH}/gd32_os/MSDK/app
+    ${PLATFORM_PATH}/gd32_os/MSDK/app/mm_app
 )
 
 set(PLATFORM_PUBINC

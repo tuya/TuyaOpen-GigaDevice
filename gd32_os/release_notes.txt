@@ -1,7 +1,82 @@
 ==========================================
 Release Notes
 ==========================================
-V1.0.3 (2025-10-22)
+V1.0.3g (2026-4-23)
+1. Add an example for Wi-Fi Smart Mesh.
+2. Add some security related BLE AT commands.
+3. Add the command "image_switch" for normal mode.
+4. Add to support system clock 80MHz for 40M HXTAL.
+5. Add new AT command to set the ip of SoftAP.
+6. Modify the MQTT APIs to encapsulate all host parameters using a structure.
+7. Fix the issue where MQTT ATCMD uses an incorrect message receive callback when the macro CONFIG_ATCMD_OTA_DEMO is enabled.
+8. Fix the issue that occurs when the HTTP response header from the server lacks the Content-Length field.
+9. Not specify advertise TX power at the BLE host layer and use the setting from EFUSE.
+10. Fix some issues about BLE passthrough mode and BLE OTA.
+11. Increase the number of TX descriptors per aggregation descriptor to enhance TCP TX throughput.
+12. Remove the absolute paths in Libs and EXE, and display only relative paths.
+
+==========================================
+V1.0.3f1 (2026-03-05)
+1. Add support for Cmake compilation, debug and download in VS code.
+
+==========================================
+V1.0.3f (2025-11-19)
+1. Add support for ble_conn_by_addr basic cmd.
+2. Add support for BLE OTA CRC check.
+3. Add support for cmake build MSDK and MBL.
+4. Fix ble uart example issue.
+5. Fix websocket and mqtt client cannot connect server.
+6. Fix atcmd can not handle uint8_t value(not isprint value) issue.
+7. Update MbedTLS from 3.6.4 to 3.6.5.
+
+==========================================
+V1.0.3e (2025-10-29)
+1. Add support for more WiFi and BLE examples.
+2. Add support for more BLE ATCMD.
+3. Add support for HTTP client ATCMD.
+4. Add support for MQTT ATCMD. 
+5. Add support for WebSocket. 
+6. Add support for setting rf efuse for ble only module.
+7. Fix aws related bugs.
+8. Fix the issue where the CPU cannot enter deep sleep after BLE is disabled.
+9. Reduce the DHCP Discover retransmission time.
+10. Update cJSON from 1.7.18 to 1.7.19.
+11. Update zephyr BLE mesh from 3.6.0 to 4.2.0.
+12. Update MbedTLS from 3.6.2 to 3.6.4.
+13. Update wpa_supplicant from 2.10 to 2.11.
+14. Do not include iperf3 or ThreadX. If needed, please contact FAE for access.
+
+==========================================
+GD32VW55x_V1.0.3_patch_1d_for_ble_passthrough_and_80211r_20250827
+1. Support 802.11r Fast Transition.
+
+==========================================
+GD32VW55x_V1.0.3_patch_1c_for_passthrough_device_switch_20250807
+1. Add ble atcmd normal datatrans mode.
+
+==========================================
+GD32VW55x_V1.0.3_patch_1b_for_common_issues_250723
+1. Fix the disconnection issue during BLE OTA.
+2. Fix dhcpd failed to renew client's IP address in SoftAP mode.
+3. Optimize the passthrough send mode in AT cmd.
+4. Add OTA service in adv data for wechat.
+5. Refine Japan telec 11b filter parameters.
+6. Synchronize MQTT code from lwip 2.1.2 to 2.2.0.
+7. Increase the stack size of cmd shell task to handle corner case.
+8. Manually free PSA memory when using mbedtls-3.6.2.
+9. Fix raw_flash_read offset issue.
+
+==========================================
+V1.0.3a (2025-05-15)
+1. Add support for choosing BLE lib. 
+2. Add support for BLE adv after disconnect feature. 
+3. Add support for modifying the start offset address of sys_status under MBL startup.
+4. Add openocd config files to MBL/MSDK project folder for debugging.
+5. Optimize the RF calibration process.
+6. Fix BLE passth long packet bug.
+
+==========================================
+V1.0.3 (2025-04-08)
 1. Add support for BLE ATCMD. 
 2. Add support for ATCMD over SPI.
 3. Add support for Inactive Power Save when Wi-Fi is disconnected idle.
@@ -12,18 +87,13 @@ V1.0.3 (2025-10-22)
 8. Add support for WPS in MSDK configuration.
 9. Add support for WPA2/WPA3 Enterprise with EAP-TLS in MSDK configuration.
 10. FatFs supports QSPI flash.
-11. Update MbedTLS from 2.17.0 to 3.6.4.
+11. Update MbedTLS from 2.17.0 to 3.6.2.
 12. Update FreeRTOS from 10.3.1 to 10.5.1.
 13. Update LwIP from 2.1.2 to 2.2.0.
 14. Update FATFS from R0.14b to R0.15a.
-15. Update cJSON from 1.5.3 to 1.7.19.
+15. Update cJSON from 1.5.3 to 1.7.18.
 16. Update Libcoap from 4.3.4 to 4.3.5.
-17. Update zephyr BLE mesh from 3.6.0 to 4.2.0.
-18. Update wpa_supplicant from 2.10 to 2.11.
-19. Do not include iperf3 or ThreadX. If needed, please contact sales or FAE for access.
 
-==========================================
-Release Notes
 ==========================================
 V1.0.2 (2024-07-17)
 1. Reduce SRAM memory usage about 20K bytes.

@@ -29,10 +29,11 @@ endif ()
 add_compile_options (
     -fno-unroll-loops
     # -Werror
-    -Wunused
+    -Wno-unused-but-set-variable
     -Wall
     -Wno-format
     -Wno-unused-function
+    -Wno-unused-variable
     -g
     -Os
     -Wno-pointer-sign
@@ -101,15 +102,6 @@ message(STATUS "libs ${list_lib}")
 
 get_property(list_lib_inc GLOBAL PROPERTY LIBSAPI)
 
-# Detect CONFIG_MP3_PLAY_ENABLE from app_cfg.h.
-# Matches only uncommented "#define CONFIG_MP3_PLAY_ENABLE" lines.
-file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/app/app_cfg.h _mp3_cfg_lines
-    REGEX "^[ \t]*#define[ \t]+CONFIG_MP3_PLAY_ENABLE")
-if(_mp3_cfg_lines)
-    set(CONFIG_MP3_PLAY_ENABLE ON)
-    message(STATUS "CONFIG_MP3_PLAY_ENABLE detected in app_cfg.h — linking play_music")
-endif()
-
 target_link_libraries(${TARGET_EXE}
     PRIVATE
         ${list_lib_inc}
@@ -118,7 +110,6 @@ target_link_libraries(${TARGET_EXE}
         rf
         rftest
         wpas
-        $<$<BOOL:${CONFIG_MP3_PLAY_ENABLE}>:play_music>
         ${ble_lib}
         nmsis_dsp_rv32imafcbp
         m
@@ -137,29 +128,26 @@ target_sources(${TARGET_EXE}
     _build_date.h
 )
 
-# Full path prefix (e.g. .../gcc/bin/riscv-nuclei-elf-) so image_prebuild/afterbuild scripts do not rely on PATH.
-set(_GD32_IMG_TOOL_PREFIX "${TOOLCHAIN_DIR}/bin/${CROSS_COMPILE}-")
-
 if(${CMAKE_HOST_WIN32})
     add_custom_command(OUTPUT _build_date.h
-        COMMAND ${TARGET_PROJECT_DIR}/image_prebuild.bat ${_GD32_IMG_TOOL_PREFIX} ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMAND ${TARGET_PROJECT_DIR}/image_prebuild.bat ${CROSS_COMPILE}- ${CMAKE_CURRENT_SOURCE_DIR} ${TOOLCHAIN_DIR}
     )
     add_custom_command(TARGET ${TARGET_EXE} POST_BUILD
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJDUMP} --source --all-headers --demangle --line-numbers --wide ${TARGET_EXE}.elf > ${TARGET_EXE}.lst
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJCOPY} -O ihex  ${TARGET_EXE}.elf  ${TARGET_EXE}.hex
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJCOPY} -O binary  ${TARGET_EXE}.elf  ${TARGET_EXE}.bin
-        COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${TARGET_PROJECT_DIR}/image_afterbuild.bat  ${_GD32_IMG_TOOL_PREFIX} ECDSA256 CERT ${TOOLCHAIN_DIR} ${PROJECT_SOURCE_DIR} \"\" ${CONFIG_PROJECT_NAME}
+        COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${TARGET_PROJECT_DIR}/image_afterbuild.bat  ${CROSS_COMPILE}- ECDSA256 CERT ${TOOLCHAIN_DIR} ${PROJECT_SOURCE_DIR} \"\" ${CONFIG_PROJECT_NAME}
         COMMENT "Building ${TARGET_EXE}"
     )
 elseif(${CMAKE_HOST_UNIX})
     add_custom_command(OUTPUT _build_date.h
-        COMMAND ${TARGET_PROJECT_DIR}/image_prebuild.sh ${_GD32_IMG_TOOL_PREFIX} ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMAND ${TARGET_PROJECT_DIR}/image_prebuild.sh ${CROSS_COMPILE}- ${CMAKE_CURRENT_SOURCE_DIR} ${TOOLCHAIN_DIR}
     )
     add_custom_command(TARGET ${TARGET_EXE} POST_BUILD
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJDUMP} --source --all-headers --demangle --line-numbers --wide ${TARGET_EXE}.elf > ${TARGET_EXE}.lst
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJCOPY} -O ihex  ${TARGET_EXE}.elf  ${TARGET_EXE}.hex
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJCOPY} -O binary  ${TARGET_EXE}.elf  ${TARGET_EXE}.bin
-        COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${TARGET_PROJECT_DIR}/image_afterbuild.sh  ${_GD32_IMG_TOOL_PREFIX} ECDSA256 CERT ${PROJECT_SOURCE_DIR}/tools/xpack-openocd-0.11.0-3_linux/bin ${PROJECT_SOURCE_DIR} \"\"
+        COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${TARGET_PROJECT_DIR}/image_afterbuild.sh  ${CROSS_COMPILE}- ECDSA256 CERT ${PROJECT_SOURCE_DIR}/tools/xpack-openocd-0.11.0-3_linux/bin ${PROJECT_SOURCE_DIR} \"\"
         COMMENT "Building ${TARGET_EXE}"
     )
 else()

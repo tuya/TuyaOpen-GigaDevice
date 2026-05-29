@@ -83,6 +83,10 @@ enum
 
     // Priority of the BLE APP task
     TKL_BLE_APP_TASK_PRIORITY   = OS_TASK_PRIORITY(1),
+
+    // Priority of the BLE adapter init task — must exceed BLE stack/app task priority
+    // so that tuya_adp_init() can drive initialization to completion before blocking.
+    TKL_BLE_INIT_TASK_PRIORITY  = OS_TASK_PRIORITY(3),
 };
 
 // Definitions of the different ble task stack size requirements
@@ -93,16 +97,10 @@ enum
 
     // BLE APP task stack size
     TKL_BLE_APP_TASK_STACK_SIZE   = 1024,//512
-};
 
-typedef struct tkl_read_info {
-    dlist_t     list;
-    uint8_t     conn_idx;
-    uint16_t    char_handle;
-    uint16_t    token;
-    uint16_t    max_len;
-    uint16_t    offset;
-} tkl_read_info_t;
+    // BLE adapter init task stack size
+    TKL_BLE_INIT_TASK_STACK_SIZE  = 512,
+};
 
 enum tkl_ble_app_evt_id
 {
@@ -160,6 +158,14 @@ typedef struct ble_conn_info
     } data;
 } ble_conn_info_t;
 
+typedef struct {
+    dlist_t       list;
+    uint8_t       srv_id;
+    uint16_t      svc_handle;
+    uint16_t      attr_num;
+    uint32_t      attr_handle_tuple[0];       // char_handle | value_len
+} ble_attr_info_t;
+
 typedef struct ble_gatts_add_srvs
 {
     uint8_t                 uuid_len;
@@ -168,6 +174,7 @@ typedef struct ble_gatts_add_srvs
     uint16_t                total_handles;
     uint16_t                cccd_num;
     ble_gatt_attr_desc_t    *p_srv_table;
+    ble_attr_info_t         *p_attr_info;
 } ble_gatts_add_srvs_t;
 
 typedef struct ble_gatts_val_info
@@ -186,7 +193,6 @@ typedef struct ble_gatts_info
         ble_gatts_val_info_t       val_info;
     } data;
 } ble_gatts_info_t;
-
 
 typedef struct ble_gattc_disc_info
 {
@@ -243,9 +249,21 @@ typedef struct {
 typedef struct
 {
     dlist_t       list;
+    uint8_t       srv_id;
+    uint16_t      svc_handle;
+    uint16_t      char_handle;
+    uint16_t      max_value_len;
+    uint16_t      curr_value_len;
+    uint8_t       value[0];
+} tkl_conn_gatts_attr_node_t;
+
+typedef struct
+{
+    dlist_t       list;
     uint8_t       role;
     uint8_t       conidx;
     uint16_t      conn_handle;
+    dlist_t       gatts_attr_list;
 } tkl_conn_dev_node_t;
 
 // Adapter environment structure
@@ -254,8 +272,8 @@ struct tkl_adp_env_tag
     uint8_t                 role;
     BOOL_T                  user_enable;
     uint8_t                 adapter_state;
-    dlist_t                 read_list;
     dlist_t                 srv_cccd_list;
+    dlist_t                 srv_attr_list;
     dlist_t                 conn_dev_list;
     uint16_t                srv_add_handle;
     tkl_adv_actv_t          adv_info;
@@ -341,11 +359,15 @@ struct tkl_adp_env_tag adp_env = {0};
 static TKL_BLE_GAP_EVT_FUNC_CB gap_evt_cb = NULL;
 static TKL_BLE_GATT_EVT_FUNC_CB gatt_evt_cb = NULL;
 static os_sema_t tuya_ble_sema;
+/** Semaphore signaled by the BLE adapter init task when TUYA_ADP_INITIALED/INITFAIL
+ *  is reached; allows tuya_hal_init() to block until initialization is complete. */
+static os_sema_t tuya_ble_init_done_sema;
 
 /*
  * LOCAL FUNCTION DEFINITIONS
  ****************************************************************************************
  */
+void tuya_adp_deinit(void);
 
 /*
  * Adapter Application
@@ -388,6 +410,15 @@ static void tkl_ble_adp_evt_handler(ble_adp_evt_t event, ble_adp_data_u *p_data)
 {
     uint8_t i = 0;
     switch (event) {
+    case BLE_ADP_EVT_DISABLE_CMPL_INFO: {
+        dbg_print(NOTICE, "=== Tuya BLE Adapter disable complete ===\r\n");
+        /* Mirror what standard ble_deinit() does: clean up all TUYAOS BLE resources.
+         * tuya_ble_sema is a static variable (not inside adp_env) — if we skip this
+         * call, the next tuya_adp_init() overwrites it without freeing, leaking ~128
+         * bytes per init/deinit cycle. */
+        tuya_adp_deinit();
+    } break;
+
     case BLE_ADP_EVT_ENABLE_CMPL_INFO: {
         TKL_BLE_GAP_PARAMS_EVT_T params_evt;
 
@@ -398,7 +429,6 @@ static void tkl_ble_adp_evt_handler(ble_adp_evt_t event, ble_adp_data_u *p_data)
                    p_data->adapter_info.version.hci_ver, p_data->adapter_info.version.hci_subver,
                    p_data->adapter_info.version.lmp_ver, p_data->adapter_info.version.lmp_subver,
                    p_data->adapter_info.version.manuf_name);
-
             dbg_print(INFO, "adv_set_num %u, min_tx_pwr %d, max_tx_pwr %d, max_adv_data_len %d \r\n",
                    p_data->adapter_info.adv_set_num, p_data->adapter_info.tx_pwr_range.min_tx_pwr,
                    p_data->adapter_info.tx_pwr_range.max_tx_pwr, p_data->adapter_info.max_adv_data_len);
@@ -451,6 +481,7 @@ static void tkl_ble_adp_evt_handler(ble_adp_evt_t event, ble_adp_data_u *p_data)
 static void tkl_ble_app_scan_mgr_evt_handler(ble_scan_evt_t scan_event, ble_scan_data_u *p_data)
 {
     TKL_BLE_GAP_PARAMS_EVT_T event;
+    sys_memset(&event, 0, sizeof(TKL_BLE_GAP_PARAMS_EVT_T));
 
     switch (scan_event) {
     case BLE_SCAN_EVT_STATE_CHG:
@@ -686,6 +717,9 @@ static tkl_conn_dev_node_t *tkl_ble_alloc_dev_by_conn_handle(uint16_t conn_handl
     p_device->conn_handle = conn_handle;
 
     list_add_tail(&p_device->list, &adp_env.conn_dev_list);
+
+    INIT_DLIST_HEAD(&p_device->gatts_attr_list);
+
     return p_device;
 }
 
@@ -701,11 +735,79 @@ static tkl_conn_dev_node_t *tkl_ble_find_alloc_dev_by_conn_handle(uint16_t conn_
     return p_device;
 }
 
+static tkl_conn_gatts_attr_node_t *tkl_ble_find_gatts_attr_by_handle(uint16_t conn_handle, uint16_t char_handle)
+{
+    tkl_conn_dev_node_t *p_device = tkl_ble_find_dev_by_conn_handle(conn_handle);
+    dlist_t *pos, *n;
+    tkl_conn_gatts_attr_node_t *p_attr = NULL;
+
+    if (p_device == NULL) {
+        return NULL;
+    }
+
+    list_for_each_safe(pos, n, &p_device->gatts_attr_list) {
+        p_attr = list_entry(pos, tkl_conn_gatts_attr_node_t, list);
+        if (p_attr->char_handle == char_handle) {
+            return p_attr;
+        }
+    }
+
+    return NULL;
+}
+
+static void tkl_ble_alloc_gatts_attr_by_dev(tkl_conn_dev_node_t *p_device)
+{
+    dlist_t *pos, *n;
+    ble_attr_info_t *p_attr;
+    tkl_conn_gatts_attr_node_t *p_gatts_attr;
+    uint16_t i = 0;
+    uint16_t char_handle;
+    uint16_t value_len;
+
+    list_for_each_safe(pos, n, &adp_env.srv_attr_list) {
+        p_attr = list_entry(pos, ble_attr_info_t, list);
+
+        while (i < p_attr->attr_num) {
+            char_handle = (p_attr->attr_handle_tuple[i] >> 16) & 0xFFFF;
+            value_len = p_attr->attr_handle_tuple[i] & 0xFFFF;
+
+            p_gatts_attr = (tkl_conn_gatts_attr_node_t *)sys_malloc(sizeof(tkl_conn_gatts_attr_node_t) + value_len);
+
+            if (p_gatts_attr) {
+                sys_memset(p_gatts_attr, 0, sizeof(tkl_conn_gatts_attr_node_t) + value_len);
+                p_gatts_attr->srv_id = p_attr->srv_id;
+                p_gatts_attr->svc_handle = p_attr->svc_handle;
+                p_gatts_attr->char_handle = char_handle;
+                p_gatts_attr->max_value_len = value_len;
+                p_gatts_attr->curr_value_len = value_len;
+
+                INIT_DLIST_HEAD(&p_gatts_attr->list);
+                list_add_tail(&p_gatts_attr->list, &p_device->gatts_attr_list);
+            }
+
+            i++;
+        }
+    }
+}
+
+static void tkl_ble_clear_gatts_attr_by_dev(tkl_conn_dev_node_t *p_device)
+{
+    dlist_t *pos, *n;
+
+    list_for_each_safe(pos, n, &p_device->gatts_attr_list) {
+        tkl_conn_gatts_attr_node_t *p_attr = list_entry(pos, tkl_conn_gatts_attr_node_t, list);
+        list_del(&p_attr->list);
+        sys_mfree(p_attr);
+    }
+}
+
 static void tkl_ble_remove_dev_by_conn_handle(uint16_t conn_handle)
 {
     tkl_conn_dev_node_t *p_device = tkl_ble_find_dev_by_conn_handle(conn_handle);
 
     if (p_device != NULL) {
+        tkl_ble_clear_gatts_attr_by_dev(p_device);
+
         list_del(&p_device->list);
         sys_mfree(p_device);
     }
@@ -760,12 +862,18 @@ static void tkl_ble_app_conn_evt_handler(ble_conn_evt_t event, ble_conn_data_u *
                     gap_evt_cb(&params_evt);
                 }
             }
+
+            tkl_ble_remove_dev_by_conn_handle(p_data->conn_state.info.discon_info.conn_hdl);
         } else if (p_data->conn_state.state == BLE_CONN_STATE_CONNECTED) {
             tkl_conn_dev_node_t *p_dev = tkl_ble_find_alloc_dev_by_conn_handle(p_data->conn_state.info.conn_info.conn_hdl);
 
             if (p_dev) {
                 p_dev->conidx = p_data->conn_state.info.conn_info.conn_idx;
                 p_dev->role = p_data->conn_state.info.conn_info.role == 0 ? TKL_BLE_ROLE_CLIENT : TKL_BLE_ROLE_SERVER;
+
+                if (p_dev->role == TKL_BLE_ROLE_SERVER) {
+                    tkl_ble_alloc_gatts_attr_by_dev(p_dev);
+                }
             }
 
             params_evt.type = TKL_BLE_GAP_EVT_CONNECT;
@@ -1248,6 +1356,7 @@ static void tkl_ble_app_adv_mgr_evt_hdlr(ble_adv_evt_t adv_evt, void *p_data, vo
 {
     tkl_adv_actv_t *p_adv = (tkl_adv_actv_t *)p_context;
     TKL_BLE_GAP_PARAMS_EVT_T event;
+    sys_memset(&event, 0, sizeof(TKL_BLE_GAP_PARAMS_EVT_T));
     event.type = TKL_BLE_GAP_EVT_ADV_STATE;
 
     switch (adv_evt) {
@@ -1422,13 +1531,13 @@ static void handle_adv_msg(uint8_t type, ble_adv_info_t *p_adv_info)
             ble_data_t rsp_data;
             if (p_adv_info->data.adv_data.p_adv_data != NULL) {
                 if (adp_env.adv_info.p_adv != NULL) {
-
                     sys_mfree(adp_env.adv_info.p_adv);
                 }
                 adp_env.adv_info.p_adv = p_adv_info->data.adv_data.p_adv_data;
                 adv.data_force = true;
                 adv_data.len = adp_env.adv_info.p_adv->length;
                 adv_data.p_data = adp_env.adv_info.p_adv->data;
+
                 adv.data.p_data_force = &adv_data;
                 p_adv = &adv;
             }
@@ -1492,32 +1601,6 @@ static uint16_t calc_char_handle_num(TKL_BLE_SERVICE_PARAMS_T *p_service)
     return total_num;
 }
 
-static tkl_read_info_t* pop_front_read_op(uint8_t conn_idx)
-{
-    dlist_t *pos, *n;
-    tkl_read_info_t *p_read_info = NULL;
-    bool found = false;
-
-    if (list_empty(&adp_env.read_list)) {
-        return NULL;
-    }
-
-    list_for_each_safe(pos, n, &adp_env.read_list) {
-        p_read_info = list_entry(pos, tkl_read_info_t, list);
-        if (conn_idx == p_read_info->conn_idx) {
-            found = true;
-            break;
-        }
-    }
-
-    if (found) {
-        list_del(&p_read_info->list);
-        return p_read_info;
-    }
-
-    return NULL;
-}
-
 static bool is_cccd(uint8_t svc_id, uint16_t cccd_handle)
 {
     dlist_t *pos, *n;
@@ -1568,6 +1651,7 @@ static ble_status_t ble_tuya_rw_cb(ble_gatts_msg_info_t *p_cb_data)
 {
     uint8_t status = BLE_ERR_NO_ERROR;
     TKL_BLE_GATT_PARAMS_EVT_T event;
+    sys_memset(&event, 0, sizeof(TKL_BLE_GATT_PARAMS_EVT_T));
     uint16_t srv_handle;
     tkl_conn_dev_node_t *p_dev = NULL;
 
@@ -1579,33 +1663,34 @@ static ble_status_t ble_tuya_rw_cb(ble_gatts_msg_info_t *p_cb_data)
 
         if (p_cb_data->msg_data.gatts_op_info.gatts_op_sub_evt == BLE_SRV_EVT_READ_REQ) {
             ble_gatts_read_req_t *p_read_req = &(p_cb_data->msg_data.gatts_op_info.gatts_op_data.read_req);
+            tkl_conn_gatts_attr_node_t *p_attr_node;
+            uint16_t len;
 
-            tkl_read_info_t *p_read_info = sys_malloc(sizeof(tkl_read_info_t));
-            if (p_read_info == NULL) {
-                status = BLE_ATT_ERR_INSUFF_RESOURCE;
-            } else {
-                p_read_req->pending_cfm = true;
+            ble_gatts_get_start_hdl(p_read_req->svc_id, &srv_handle);
+
+            p_attr_node = tkl_ble_find_gatts_attr_by_handle(p_dev->conn_handle, srv_handle + p_read_req->att_idx);
+
+            if (p_attr_node) {
+                len = ble_min(p_read_req->max_len, p_attr_node->curr_value_len - p_read_req->offset);
+                p_read_req->val_len = len;
+                p_read_req->att_len = p_attr_node->curr_value_len;
+                sys_memcpy(p_read_req->p_val, p_attr_node->value + p_read_req->offset, len);
 
                 event.type = TKL_BLE_GATT_EVT_READ_CHAR_VALUE;
                 event.conn_handle = p_dev->conn_handle;
-                ble_gatts_get_start_hdl(p_read_req->svc_id, &srv_handle);
                 event.gatt_event.char_read.char_handle = srv_handle + p_read_req->att_idx;
                 event.gatt_event.char_read.offset = p_read_req->offset;
-
-                p_read_info->conn_idx = p_cb_data->msg_data.gatts_op_info.conn_idx;
-                p_read_info->char_handle = event.gatt_event.char_read.char_handle;
-                p_read_info->token = p_read_req->token;
-                p_read_info->max_len = p_read_req->max_len;
-                p_read_info->offset = p_read_req->offset;
-                INIT_DLIST_HEAD(&p_read_info->list);
-                list_add_tail(&p_read_info->list, &adp_env.read_list);
 
                 if (gatt_evt_cb) {
                     gatt_evt_cb(&event);
                 }
+            } else {
+                return BLE_ATT_ERR_INVALID_HANDLE;
             }
         } else if (p_cb_data->msg_data.gatts_op_info.gatts_op_sub_evt == BLE_SRV_EVT_WRITE_REQ) {
             ble_gatts_write_req_t *p_write_req = &(p_cb_data->msg_data.gatts_op_info.gatts_op_data.write_req);
+            tkl_conn_gatts_attr_node_t *p_attr_node;
+
             ble_gatts_get_start_hdl(p_write_req->svc_id, &srv_handle);
             event.conn_handle = p_dev->conn_handle;
 
@@ -1618,6 +1703,18 @@ static ble_status_t ble_tuya_rw_cb(ble_gatts_msg_info_t *p_cb_data)
                 event.gatt_event.subscribe.prev_indicate = 0;
                 event.gatt_event.subscribe.cur_indicate = ((*p_write_req->p_val) & 0x02) >> 1;
             } else {
+                p_attr_node = tkl_ble_find_gatts_attr_by_handle(p_dev->conn_handle, srv_handle + p_write_req->att_idx);
+                if (p_attr_node == NULL) {
+                    return BLE_ATT_ERR_INVALID_HANDLE;
+                }
+
+                if (p_write_req->val_len + p_write_req->offset > p_attr_node->max_value_len) {
+                    return BLE_ATT_ERR_INVALID_OFFSET;
+                }
+
+                sys_memcpy(p_attr_node->value + p_write_req->offset, p_write_req->p_val, p_write_req->val_len);
+                p_attr_node->curr_value_len = p_write_req->offset + p_write_req->val_len;
+
                 event.type = TKL_BLE_GATT_EVT_WRITE_REQ;
                 event.gatt_event.write_report.char_handle = srv_handle + p_write_req->att_idx;
                 event.gatt_event.write_report.report.length = p_write_req->val_len;
@@ -1634,8 +1731,9 @@ static ble_status_t ble_tuya_rw_cb(ble_gatts_msg_info_t *p_cb_data)
             event.conn_handle = p_dev->conn_handle;
             ble_gatts_get_start_hdl(p_ntf_ind->svc_id, &srv_handle);
 
+            event.result = (INT_T)p_ntf_ind->status;
             event.gatt_event.notify_result.char_handle = srv_handle + p_ntf_ind->att_idx;
-            event.gatt_event.notify_result.result = p_ntf_ind->status;
+            event.gatt_event.notify_result.result = (INT_T)p_ntf_ind->status;
             if (gatt_evt_cb) {
                 gatt_evt_cb(&event);
             }
@@ -1647,12 +1745,25 @@ static ble_status_t ble_tuya_rw_cb(ble_gatts_msg_info_t *p_cb_data)
         if (p_cb_data->msg_data.svc_add_rsp.status != BLE_ERR_NO_ERROR) {
             dlist_t *pos, *n;
             ble_cccd_info_t *p_info = NULL;
+            ble_attr_info_t *p_attr_info = NULL;
+
             if (!list_empty(&adp_env.srv_cccd_list)) {
                 list_for_each_safe(pos, n, &adp_env.srv_cccd_list) {
                     p_info = list_entry(pos, ble_cccd_info_t, list);
                     if (p_info->srv_id == p_cb_data->msg_data.svc_add_rsp.svc_id) {
                         list_del(&p_info->list);
                         sys_mfree(p_info);
+                        break;
+                    }
+                }
+            }
+
+            if (!list_empty(&adp_env.srv_attr_list)) {
+                list_for_each_safe(pos, n, &adp_env.srv_attr_list) {
+                    p_attr_info = list_entry(pos, ble_attr_info_t, list);
+                    if (p_attr_info->srv_id == p_cb_data->msg_data.svc_add_rsp.svc_id) {
+                        list_del(&p_attr_info->list);
+                        sys_mfree(p_attr_info);
                         break;
                     }
                 }
@@ -1708,31 +1819,56 @@ static void handle_gatts_msg(uint8_t type, ble_gatts_info_t *p_gatts_info)
                         p_info->cccd_num++;
                     }
                 }
-                list_add_tail(&adp_env.srv_cccd_list, &p_info->list);
+                list_add_tail(&p_info->list, &adp_env.srv_cccd_list);
             } else {
                 dbg_print(ERR, "alloc cccd array fail \r\n");
             }
+
+            p_gatts_info->data.add_srvs.p_attr_info->srv_id = srv_id;
+            p_gatts_info->data.add_srvs.p_attr_info->svc_handle = p_gatts_info->data.add_srvs.start_handle;
+            list_add_tail(&p_gatts_info->data.add_srvs.p_attr_info->list, &adp_env.srv_attr_list);
         }
 
         sys_mfree(p_gatts_info->data.add_srvs.p_srv_table);
     } break;
 
     case GATTS_SUBTYPE_SET_VAL: {
-        tkl_read_info_t* p_read_info;
+        tkl_conn_gatts_attr_node_t *p_attr_node;
+        tkl_conn_dev_node_t *p_device;
         uint16_t len;
 
-        p_read_info = pop_front_read_op(p_dev->conidx);
+        p_device = tkl_ble_find_dev_by_conn_handle(p_gatts_info->data.val_info.conn_handle);
+        p_attr_node = tkl_ble_find_gatts_attr_by_handle(p_gatts_info->data.val_info.conn_handle, p_gatts_info->data.val_info.char_handle);
+        if (p_device == NULL || p_attr_node == NULL) {
+            dbg_print(ERR, "can't find node conn handle 0x%04x char handle 0x%04x \r\n",
+                      p_gatts_info->data.val_info.conn_handle, p_gatts_info->data.val_info.char_handle);
+        } else {
+            if (p_gatts_info->data.val_info.length > p_attr_node->max_value_len) {
+                tkl_conn_gatts_attr_node_t *p_new_attr_node = sys_malloc(sizeof(tkl_conn_gatts_attr_node_t) + p_gatts_info->data.val_info.length);
+                if (p_new_attr_node) {
+                    p_new_attr_node->srv_id = p_attr_node->srv_id;
+                    p_new_attr_node->svc_handle = p_attr_node->svc_handle;
+                    p_new_attr_node->char_handle = p_attr_node->char_handle;
+                    p_new_attr_node->max_value_len = p_gatts_info->data.val_info.length;
+                    p_new_attr_node->curr_value_len = p_gatts_info->data.val_info.length;
+                    sys_memcpy(p_new_attr_node->value, p_gatts_info->data.val_info.p_data, p_gatts_info->data.val_info.length);
 
-        if (p_read_info != NULL) {
-            len = ble_min(p_read_info->max_len, p_gatts_info->data.val_info.length);
-            if (ble_gatts_svc_attr_read_cfm(p_read_info->conn_idx, p_read_info->token,
-                                            BLE_ERR_NO_ERROR, p_gatts_info->data.val_info.length + p_read_info->offset,
-                                            len, p_gatts_info->data.val_info.p_data) != BLE_ERR_NO_ERROR) {
-                dbg_print(ERR, "read confirm fail \r\n");
+                    INIT_DLIST_HEAD(&p_new_attr_node->list);
+                    list_add_tail(&p_new_attr_node->list, &p_device->gatts_attr_list);
+
+                    list_del(&p_attr_node->list);
+                    sys_mfree(p_attr_node);
+                } else {
+                    dbg_print(WARNING, "alloc new attr node fail \r\n");
+                    p_attr_node->curr_value_len = p_attr_node->max_value_len;
+                    sys_memcpy(p_attr_node->value, p_gatts_info->data.val_info.p_data, p_attr_node->max_value_len);
+                }
+            } else {
+                p_attr_node->curr_value_len = p_gatts_info->data.val_info.length;
+                sys_memcpy(p_attr_node->value, p_gatts_info->data.val_info.p_data, p_gatts_info->data.val_info.length);
             }
-
-            sys_mfree(p_read_info);
         }
+
         sys_mfree(p_gatts_info->data.val_info.p_data);
     } break;
 
@@ -1766,7 +1902,7 @@ static ble_status_t tkl_ble_app_gattc_cb(ble_gattc_co_msg_info_t *p_msg_info)
     TKL_BLE_GATT_PARAMS_EVT_T event;
     tkl_conn_dev_node_t *p_dev = tkl_ble_find_dev_by_conidx(p_msg_info->conn_idx);
 
-    if (p_dev == NULL) {
+    if (p_dev == NULL && p_msg_info->cli_cb_msg_type != BLE_CLI_CO_EVT_CONN_STATE_CHANGE_IND) {
         dbg_print(ERR, "tkl_ble_app_gattc_cb can't find conn_idx 0x%0x device\r\n", p_msg_info->conn_idx);
         return BLE_ERR_NO_ERROR;
     }
@@ -1985,19 +2121,94 @@ OPERATE_RET tuya_hal_gatt_callback_register(const TKL_BLE_GATT_EVT_FUNC_CB gatt_
     return OPRT_OK;
 }
 
-// FIX TODO as tuya register gatt service before hal init, so we have to call tuya_adp_init
-// in main function
+/**
+ * @brief  High-priority task that drives BLE adapter initialization.
+ *
+ * Running at TKL_BLE_INIT_TASK_PRIORITY (above BLE stack/app tasks) this task
+ * calls tuya_adp_init(), which creates the BLE stack tasks and enables the
+ * hardware.  It then blocks on tuya_ble_sema, which is released by
+ * tkl_ble_adp_evt_handler() once BLE_ADP_EVT_ENABLE_CMPL_INFO is received.
+ * After unblocking it re-signals tuya_ble_sema (so tuya_wait_ble_ready()
+ * callers still work) and notifies tuya_hal_init() via tuya_ble_init_done_sema.
+ */
+static void tuya_ble_adp_init_task(void *arg)
+{
+    uint8_t role = (uint8_t)(uintptr_t)arg;
+
+    tuya_adp_init(role);
+
+    /* tuya_adp_init() resets adp_env via memset; set user_enable so that the
+     * gap_evt_cb TKL_BLE_EVT_STACK_INIT callback fires when the adapter
+     * enable-complete event arrives. */
+    adp_env.user_enable = TRUE;
+
+    /* Block until BLE_ADP_EVT_ENABLE_CMPL_INFO (success or failure). */
+    sys_sema_down(&tuya_ble_sema, 0);
+
+    /* Re-signal so tuya_wait_ble_ready() can still be consumed by callers. */
+    sys_sema_up(&tuya_ble_sema);
+
+    /* Wake tuya_hal_init(). */
+    sys_sema_up(&tuya_ble_init_done_sema);
+
+    sys_task_delete(NULL);
+}
+
 OPERATE_RET tuya_hal_init(uint8_t role)
 {
-    tkl_app_msg_t adp_msg;
+    void *init_task_hdl;
 
-    adp_msg.id = TKL_BLE_EVT_ID_ADP(ADP_SUBTYPE_ENABLE);
+    /* Skip re-init if already initialised and the effective role has not changed.
+     *
+     * Normalisation rule (matches mm_cmd_parse.c proto_role→tkl_role mapping):
+     *   role == TUYA_BLE_ROLE_SERVER (0x01)  — Peripheral
+     *   role == TUYA_BLE_ROLE_CLIENT (0x02)  — Central
+     *   role == 0x03 (SERVER|CLIENT / Dual)  — treated as "no change"; never
+     *                                           triggers a re-init cycle.
+     *
+     * Transitions that require re-init: 0x01↔0x02.
+     * Dual role (0x03) coming in, or current role being 0x03, skips re-init.
+     */
+    if (adp_env.adapter_state == TUYA_ADP_INITIALED) {
+        uint8_t cur_role = adp_env.role & (TUYA_BLE_ROLE_SERVER | TUYA_BLE_ROLE_CLIENT);
+        uint8_t new_role = role        & (TUYA_BLE_ROLE_SERVER | TUYA_BLE_ROLE_CLIENT);
+        /* If either side is dual-role (0x03) or roles are identical → skip */
+        if (cur_role == new_role ||
+            cur_role == (TUYA_BLE_ROLE_SERVER | TUYA_BLE_ROLE_CLIENT) ||
+            new_role == (TUYA_BLE_ROLE_SERVER | TUYA_BLE_ROLE_CLIENT)) {
+            printf("tuya_hal_init: already initialised with compatible role (cur_role=0x%02x, new_role=0x%02x), skipping re-init\r\n",
+                   cur_role, new_role);
+            return OPRT_OK;
+        }
+        /* Effective role changed (SERVER↔CLIENT): deinit first */
+        tuya_adp_deinit();
+    }
 
-    if (!ble_local_app_msg_send(&adp_msg, sizeof(tkl_app_msg_t))) {
+    sys_sema_init(&tuya_ble_init_done_sema, 0);
+
+    /* Create a task with priority above both BLE stack/app tasks so that
+     * tuya_adp_init() completes its setup before any lower-priority work
+     * preempts it.  The task self-deletes after signaling completion. */
+    init_task_hdl = sys_task_create(NULL,
+                                    (const uint8_t *)"ble_adp_init",
+                                    NULL,
+                                    TKL_BLE_INIT_TASK_STACK_SIZE,
+                                    0, 0,
+                                    TKL_BLE_INIT_TASK_PRIORITY,
+                                    tuya_ble_adp_init_task,
+                                    (void *)(uintptr_t)role);
+    if (init_task_hdl == NULL) {
+        sys_sema_free(&tuya_ble_init_done_sema);
         return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
     }
 
-    return OPRT_OK;
+    /* Block until tuya_ble_adp_init_task() signals completion. */
+    sys_sema_down(&tuya_ble_init_done_sema, 0);
+    sys_sema_free(&tuya_ble_init_done_sema);
+
+    return (adp_env.adapter_state == TUYA_ADP_INITIALED)
+             ? OPRT_OK
+             : OPRT_OS_ADAPTER_BLE_INIT_FAILED;
 }
 
 void tuya_adp_init(uint8_t role)
@@ -2069,8 +2280,8 @@ void tuya_adp_init(uint8_t role)
 
     adp_env.role = role;
 
-    INIT_DLIST_HEAD(&adp_env.read_list);
     INIT_DLIST_HEAD(&adp_env.srv_cccd_list);
+    INIT_DLIST_HEAD(&adp_env.srv_attr_list);
     INIT_DLIST_HEAD(&adp_env.conn_dev_list);
 
     adp_env.adv_info.idx = TKL_ADV_INVALID_IDX;
@@ -2090,9 +2301,76 @@ void tuya_adp_init(uint8_t role)
     return;
 }
 
+void tuya_adp_deinit(void)
+{
+    dlist_t *pos, *n;
+
+    if (adp_env.adapter_state == TUYA_ADP_IDLE) {
+        return;
+    }
+
+    /* Block new API calls immediately */
+    adp_env.adapter_state = TUYA_ADP_IDLE;
+
+    /* Free pending advertisement data */
+    if (adp_env.adv_info.p_adv != NULL) {
+        sys_mfree(adp_env.adv_info.p_adv);
+        adp_env.adv_info.p_adv = NULL;
+    }
+    if (adp_env.adv_info.p_rsp != NULL) {
+        sys_mfree(adp_env.adv_info.p_rsp);
+        adp_env.adv_info.p_rsp = NULL;
+    }
+
+    /* Free CCCD info list */
+    list_for_each_safe(pos, n, &adp_env.srv_cccd_list) {
+        ble_cccd_info_t *p_cccd = list_entry(pos, ble_cccd_info_t, list);
+        list_del(&p_cccd->list);
+        sys_mfree(p_cccd);
+    }
+
+    /* Free ATTR info list */
+    list_for_each_safe(pos, n, &adp_env.srv_attr_list) {
+        ble_attr_info_t *p_attr = list_entry(pos, ble_attr_info_t, list);
+        list_del(&p_attr->list);
+        sys_mfree(p_attr);
+    }
+
+    /* Free connected device list */
+    list_for_each_safe(pos, n, &adp_env.conn_dev_list) {
+        tkl_conn_dev_node_t *p_dev = list_entry(pos, tkl_conn_dev_node_t, list);
+        tkl_ble_clear_gatts_attr_by_dev(p_dev);
+        list_del(&p_dev->list);
+        sys_mfree(p_dev);
+    }
+
+    /* Unregister all BLE stack callbacks — each registration allocates a heap node
+     * inside the BLE stack; failing to unregister leaks those nodes every cycle. */
+    ble_adp_callback_unregister(tkl_ble_adp_evt_handler);
+    ble_conn_callback_unregister(tkl_ble_app_conn_evt_handler);
+    ble_sec_callback_unregister(tkl_ble_app_sec_evt_handler);
+    if (adp_env.role & TUYA_BLE_ROLE_CLIENT) {
+        ble_scan_callback_unregister(tkl_ble_app_scan_mgr_evt_handler);
+        /* gattc co client has no unregister API */
+    }
+
+    /* Shut down BLE stack, hardware and interrupt */
+    ble_power_off();
+    ble_irq_disable();
+
+    /* Release ready semaphore */
+    sys_sema_free(&tuya_ble_sema);
+
+    sys_memset(&adp_env, 0, sizeof(struct tkl_adp_env_tag));
+}
+
 OPERATE_RET tuya_hal_scan_start(TKL_BLE_GAP_SCAN_PARAMS_T const *p_scan_params)
 {
     tkl_app_msg_t scan_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     if (p_scan_params->extended != 0 || p_scan_params->scan_channel_map != 0x07) {
         return OPRT_INVALID_PARM;
@@ -2112,6 +2390,10 @@ OPERATE_RET tuya_hal_scan_stop()
 {
     tkl_app_msg_t scan_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     scan_msg.id = TKL_BLE_EVT_ID_SCAN(SCAN_SUBTYPE_DISABLE);
 
     if (!ble_local_app_msg_send(&scan_msg, sizeof(tkl_app_msg_t))) {
@@ -2124,6 +2406,10 @@ OPERATE_RET tuya_hal_scan_stop()
 OPERATE_RET tuya_hal_adv_start(TKL_BLE_GAP_ADV_PARAMS_T const *p_adv_params)
 {
     tkl_app_msg_t adv_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     if (p_adv_params->adv_type == TKL_BLE_GAP_ADV_TYPE_EXTENDED_NONCONN_NONSCANNABLE_DIRECTED) {
         return OPRT_INVALID_PARM;
@@ -2143,6 +2429,10 @@ OPERATE_RET tuya_hal_adv_stop()
 {
     tkl_app_msg_t adv_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     adv_msg.id = TKL_BLE_EVT_ID_ADV(ADV_SUBTYPE_STOP);
 
     if (!ble_local_app_msg_send(&adv_msg, sizeof(tkl_app_msg_t))) {
@@ -2155,6 +2445,10 @@ OPERATE_RET tuya_hal_adv_stop()
 OPERATE_RET tuya_hal_adv_rsp_data_set(TKL_BLE_DATA_T const *p_adv, TKL_BLE_DATA_T const *p_scan_rsp)
 {
     tkl_app_msg_t adv_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     tkl_ble_adv_data_t * p_data;
 
@@ -2199,6 +2493,10 @@ OPERATE_RET tuya_hal_adv_rsp_data_update(TKL_BLE_DATA_T const *p_adv, TKL_BLE_DA
 {
     tkl_app_msg_t adv_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     tkl_ble_adv_data_t * p_data;
 
     if (p_adv != NULL) {
@@ -2242,6 +2540,10 @@ OPERATE_RET tuya_hal_ble_connect(TKL_BLE_GAP_ADDR_T const *p_peer_addr, TKL_BLE_
 {
     tkl_app_msg_t conn_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     conn_msg.data.conn_info.data.conn_params.peer_addr = *p_peer_addr;
     conn_msg.data.conn_info.data.conn_params.scan_params = *p_scan_params;
     conn_msg.data.conn_info.data.conn_params.conn_params = *p_conn_params;
@@ -2259,6 +2561,10 @@ OPERATE_RET tuya_hal_ble_disconnect(uint16_t conn_handle, uint8_t hci_reason)
 {
     tkl_app_msg_t disconn_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     disconn_msg.data.conn_info.data.disconn_reason = hci_reason;
     disconn_msg.data.conn_info.conn_handle = conn_handle;
 
@@ -2274,6 +2580,10 @@ OPERATE_RET tuya_hal_ble_disconnect(uint16_t conn_handle, uint8_t hci_reason)
 OPERATE_RET tuya_hal_ble_conn_param_update(uint16_t conn_handle, TKL_BLE_GAP_CONN_PARAMS_T const *p_conn_params)
 {
     tkl_app_msg_t params_upd_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     params_upd_msg.data.conn_info.data.conn_upd_params = *p_conn_params;
     params_upd_msg.data.conn_info.conn_handle = conn_handle;
@@ -2291,6 +2601,10 @@ OPERATE_RET tuya_hal_ble_rssi_get(uint16_t conn_handle)
 {
     tkl_app_msg_t rssi_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     rssi_msg.data.conn_info.conn_handle = conn_handle;
 
     rssi_msg.id = TKL_BLE_EVT_ID_CONN(CONN_SUBTYPE_CONN_RSSI_GET);
@@ -2306,6 +2620,10 @@ OPERATE_RET tuya_hal_ble_name_set(char *p_name)
 {
     tkl_app_msg_t name_msg;
     uint16_t len;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     if (p_name == NULL) {
         return OPRT_NOT_SUPPORTED;
@@ -2342,6 +2660,11 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
     TKL_BLE_CHAR_PARAMS_T *p_cur_char;
     uint16_t total_handle = 0;
     ble_gatt_attr_desc_t *p_srv_table = NULL;
+    ble_attr_info_t *p_info = NULL;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     for (i = 0; i < p_service->svc_num; i++) {
         p_cur_service = &(p_service->p_service[i]);
@@ -2354,6 +2677,14 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
             // Just continue
             continue;
         }
+
+        p_info = sys_malloc(sizeof(ble_attr_info_t) + p_cur_service->char_num * sizeof(uint32_t));
+        if (p_info == NULL) {
+            sys_mfree(p_srv_table);
+            continue;
+        }
+        p_info->attr_num = p_cur_service->char_num;
+        INIT_DLIST_HEAD(&p_info->list);
 
         sys_memset(p_srv_table, 0, sizeof(ble_gatt_attr_desc_t) * total_handle);
         if (p_cur_service->svc_uuid.uuid_type == TKL_BLE_UUID_TYPE_32) {
@@ -2370,6 +2701,7 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
         srv_msg.data.gatts_info.data.add_srvs.total_handles = total_handle;
         srv_msg.data.gatts_info.data.add_srvs.cccd_num = 0;
         srv_msg.data.gatts_info.data.add_srvs.start_handle = adp_env.srv_add_handle;
+        srv_msg.data.gatts_info.data.add_srvs.p_attr_info = p_info;
         p_cur_service->handle = adp_env.srv_add_handle;
         adp_env.srv_add_handle += total_handle;
 
@@ -2380,6 +2712,7 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
             *((uint16_t *)(p_srv_table[0].uuid)) = BLE_GATT_DECL_SECONDARY_SERVICE;
         } else {
             sys_mfree(p_srv_table);
+            sys_mfree(p_info);
             dbg_print(ERR, "tuya_hal_gatts_service_add wrong service type\r\n");
             continue;
         }
@@ -2420,7 +2753,6 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
             }
 
             if (p_cur_char->property & TKL_BLE_GATT_CHAR_PROP_WRITE) {
-                p_srv_table[total_handle].ext_info = 1024; // workaround for ios MTU size
                 p_srv_table[total_handle].info |= PROP(WR);
             }
 
@@ -2452,6 +2784,10 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
                 p_srv_table[total_handle].ext_info |= OPT(NO_OFFSET);
             }
 
+            if (p_info != NULL) {
+                p_info->attr_handle_tuple[j] = (p_cur_char->handle << 16) | p_cur_char->value_len;
+            }
+
             total_handle++;
 
             // cccd
@@ -2478,6 +2814,7 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
 
         if (!ble_local_app_msg_send(&srv_msg, sizeof(tkl_app_msg_t))) {
             sys_mfree(srv_msg.data.gatts_info.data.add_srvs.p_srv_table);
+            sys_mfree(p_info);
             adp_env.srv_add_handle -= total_handle;
             p_cur_service->handle = 0xFFFF;
             continue;
@@ -2490,6 +2827,10 @@ OPERATE_RET tuya_hal_gatts_service_add(TKL_BLE_GATTS_PARAMS_T *p_service)
 OPERATE_RET tuya_hal_gatts_value_set(uint16_t conn_handle, uint16_t char_handle, uint8_t *p_data, uint16_t length)
 {
     tkl_app_msg_t set_val_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     set_val_msg.data.gatts_info.data.val_info.p_data = sys_malloc(length);
 
@@ -2511,9 +2852,34 @@ OPERATE_RET tuya_hal_gatts_value_set(uint16_t conn_handle, uint16_t char_handle,
     return OPRT_OK;
 }
 
+OPERATE_RET tuya_hal_gatts_value_get(uint16_t conn_handle, uint16_t char_handle, uint8_t *p_data, uint16_t length)
+{
+    tkl_conn_gatts_attr_node_t *p_attr_node;
+    uint16_t len;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
+    p_attr_node = tkl_ble_find_gatts_attr_by_handle(conn_handle, char_handle);
+    if (p_attr_node == NULL) {
+        dbg_print(ERR, "can't find attr for conn handle 0x%04x char handle 0x%04x \r\n", conn_handle, char_handle);
+        return OPRT_OS_ADAPTER_BLE_HANDLE_ERROR;
+    } else {
+        len = length > p_attr_node->curr_value_len ? p_attr_node->curr_value_len : length;
+        sys_memcpy(p_data, p_attr_node->value, len);
+        return OPRT_OK;
+    }
+}
+
 OPERATE_RET tuya_hal_gatts_value_notify(uint16_t conn_handle, uint16_t char_handle, uint8_t *p_data, uint16_t length)
 {
     tkl_app_msg_t notify_val_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     notify_val_msg.data.gatts_info.data.val_info.p_data = sys_malloc(length);
 
     if (notify_val_msg.data.gatts_info.data.val_info.p_data == NULL) {
@@ -2537,6 +2903,11 @@ OPERATE_RET tuya_hal_gatts_value_notify(uint16_t conn_handle, uint16_t char_hand
 OPERATE_RET tuya_hal_gatts_value_indicate(uint16_t conn_handle, uint16_t char_handle, uint8_t *p_data, uint16_t length)
 {
     tkl_app_msg_t notify_val_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     notify_val_msg.data.gatts_info.data.val_info.p_data = sys_malloc(length);
 
     if (notify_val_msg.data.gatts_info.data.val_info.p_data == NULL) {
@@ -2561,6 +2932,10 @@ OPERATE_RET tuya_hal_gattc_all_service_discovery(uint16_t conn_handle)
 {
     tkl_app_msg_t disc_srv_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     disc_srv_msg.id = TKL_BLE_EVT_ID_GATTC(GATTC_SUBTYPE_DISC_SRV);
     disc_srv_msg.data.gattc_info.conn_handle = conn_handle;
     disc_srv_msg.data.gattc_info.data.disc_info.start_handle = 0x0001;
@@ -2576,6 +2951,10 @@ OPERATE_RET tuya_hal_gattc_all_service_discovery(uint16_t conn_handle)
 OPERATE_RET tuya_hal_gattc_all_char_discovery(uint16_t conn_handle, uint16_t start_handle, uint16_t end_handle)
 {
     tkl_app_msg_t disc_char_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     disc_char_msg.id = TKL_BLE_EVT_ID_GATTC(GATTC_SUBTYPE_DISC_CHAR);
     disc_char_msg.data.gattc_info.conn_handle = conn_handle;
@@ -2593,6 +2972,10 @@ OPERATE_RET tuya_hal_gattc_char_desc_discovery(uint16_t conn_handle, uint16_t st
 {
     tkl_app_msg_t disc_desc_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     disc_desc_msg.id = TKL_BLE_EVT_ID_GATTC(GATTC_SUBTYPE_DISC_DESC);
     disc_desc_msg.data.gattc_info.conn_handle = conn_handle;
     disc_desc_msg.data.gattc_info.data.disc_info.start_handle = start_handle;
@@ -2608,6 +2991,10 @@ OPERATE_RET tuya_hal_gattc_char_desc_discovery(uint16_t conn_handle, uint16_t st
 OPERATE_RET tuya_hal_gattc_write_without_rsp(uint16_t conn_handle, uint16_t char_handle, uint8_t *p_data, uint16_t length)
 {
     tkl_app_msg_t write_msg;
+
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
 
     write_msg.data.gattc_info.data.write_info.p_value = sys_malloc(length);
 
@@ -2633,6 +3020,10 @@ OPERATE_RET tuya_hal_gattc_write(uint16_t conn_handle, uint16_t char_handle, uin
 {
     tkl_app_msg_t write_msg;
 
+    if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+        return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+    }
+
     write_msg.data.gattc_info.data.write_info.p_value = sys_malloc(length);
 
     if (write_msg.data.gattc_info.data.write_info.p_value == NULL) {
@@ -2656,6 +3047,10 @@ OPERATE_RET tuya_hal_gattc_write(uint16_t conn_handle, uint16_t char_handle, uin
 OPERATE_RET tuya_hal_gattc_read(uint16_t conn_handle, uint16_t char_handle)
 {
       tkl_app_msg_t write_msg;
+
+      if (adp_env.adapter_state != TUYA_ADP_INITIALED) {
+          return OPRT_OS_ADAPTER_BLE_INIT_FAILED;
+      }
 
       write_msg.data.gattc_info.data.read_char_handle = char_handle;
 

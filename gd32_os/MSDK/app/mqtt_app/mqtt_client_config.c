@@ -41,21 +41,66 @@ OF SUCH DAMAGE.
 
 #ifndef CONFIG_ATCMD
 char client_id[] = {'G', 'i', 'g', 'a', 'D', 'e', 'v', 'i', 'c', 'e', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-#else
-char *client_id = NULL;
 #endif
-char *client_user = NULL;
-char *client_pass = NULL;
-u16_t keep_alive = 120;
-char *will_topic = NULL;
-char *will_msg = NULL;
-u8_t will_qos = 0;
-u8_t will_retain = 0;
-u8_t clean_session_disabled = 0;
-struct mqtt_connect_client_info_t base_client_user_info;
-bool mqtt_waiting_for_conn_cb = false;
 
-int mqtt_client_id_set(char *new_client_id, int16_t len)
+enum tls_auth_mode {
+    TLS_AUTH_MODE_NONE,
+    TLS_AUTH_MODE_KEY_SHARE,
+    TLS_AUTH_MODE_CERT_1WAY,
+    TLS_AUTH_MODE_CERT_2WAY,
+    TLS_AUTH_MODE_PSK,
+    TLS_AUTH_MODE_CERT_CLIENT_ONLY,
+};
+
+mqtt_client_context_t* mqtt_client_context_init(void)
+{
+    mqtt_client_context_t* mqtt_ctx = sys_calloc(1, sizeof(mqtt_client_context_t));
+    if (mqtt_ctx == NULL) {
+#ifdef CONFIG_ATCMD
+        app_print("mqtt_client_context malloc failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
+#else
+        app_print("mqtt_client_context malloc failed\r\n");
+#endif
+        return NULL;
+    }
+
+    mqtt_ctx->client_user_info = sys_calloc(1, sizeof(struct mqtt_connect_client_info_t));
+    if (mqtt_ctx->client_user_info == NULL) {
+#ifdef CONFIG_ATCMD
+        app_print("mqtt client user info malloc failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
+#else
+        app_print("mqtt client user info malloc failed\r\n");
+#endif
+        sys_mfree(mqtt_ctx);
+        mqtt_ctx = NULL;
+        return NULL;
+    }
+
+    mqtt_ctx->port = MQTT_DEFAULT_PORT;
+    mqtt_ctx->tls_encry_mode = TLS_AUTH_MODE_NONE;
+    mqtt_ctx->mqtt_cmd_mode = MODE_TYPE_MQTT5;
+    mqtt_ctx->auto_reconnect_limit = AUTO_RECONNECT_LIMIT;
+    mqtt_ctx->auto_reconnect = false;
+    mqtt_ctx->auto_reconnect_num = 0;
+    mqtt_ctx->auto_reconnect_interval = 20000; // ms, 20s
+    mqtt_ctx->mqtt_task_suspended = false;
+    mqtt_ctx->mqtt_task_handle = NULL;
+    memset(&(mqtt_ctx->server_ip_addr), 0, sizeof(ip_addr_t));
+    mqtt_ctx->waiting_for_conn_cb = false;
+#ifndef CONFIG_ATCMD
+    mqtt_ctx->client_user_info->client_id = client_id;
+#else
+    mqtt_ctx->client_user_info->client_id = NULL;
+#endif
+    mqtt_ctx->client_user_info->keep_alive = 120;
+    mqtt_ctx->client_user_info->clean_session_disabled = 0;
+    mqtt_ctx->client_user_info->will_qos = 0;
+    mqtt_ctx->client_user_info->will_retain = 0;
+
+    return mqtt_ctx;
+}
+
+int mqtt_client_id_set(mqtt_client_context_t *mqtt_ctx, char *new_client_id, int16_t len)
 {
     if (new_client_id == NULL) {
 #ifndef CONFIG_ATCMD
@@ -72,28 +117,26 @@ int mqtt_client_id_set(char *new_client_id, int16_t len)
         return -2;
     }
 #else
-    if (client_id) {
-        sys_mfree(client_id);
-        client_id = NULL;
-        base_client_user_info.client_id = NULL;
+    if (mqtt_ctx->client_user_info->client_id) {
+        sys_mfree(mqtt_ctx->client_user_info->client_id);
+        mqtt_ctx->client_user_info->client_id = NULL;
     }
-    client_id = sys_malloc(len + 1);
-    if (client_id == NULL) {
+    mqtt_ctx->client_user_info->client_id = sys_malloc(len + 1);
+    if (mqtt_ctx->client_user_info->client_id == NULL) {
         app_print("client id malloc failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
         return -2;
     }
 #endif
 
-    sys_memcpy(client_id, new_client_id, len);
-    if (client_id[len] != 0) {
-        client_id[len] = 0;
+    sys_memcpy(mqtt_ctx->client_user_info->client_id, new_client_id, len);
+    if (mqtt_ctx->client_user_info->client_id[len] != 0) {
+        mqtt_ctx->client_user_info->client_id[len] = 0;
     }
-    base_client_user_info.client_id = client_id;
 
     return 0;
 }
 
-int mqtt_client_user_set(char *new_client_user, int16_t len)
+int mqtt_client_user_set(mqtt_client_context_t *mqtt_ctx, char *new_client_user, int16_t len)
 {
     if (new_client_user == NULL) {
 #ifdef CONFIG_ATCMD
@@ -104,13 +147,12 @@ int mqtt_client_user_set(char *new_client_user, int16_t len)
         return -1;
     }
 
-    if (client_user) {
-        sys_mfree(client_user);
-        client_user = NULL;
-        base_client_user_info.client_user = NULL;
+    if (mqtt_ctx->client_user_info->client_user) {
+        sys_mfree(mqtt_ctx->client_user_info->client_user);
+        mqtt_ctx->client_user_info->client_user = NULL;
     }
-    client_user = sys_malloc(len + 1);
-    if (client_user == NULL) {
+    mqtt_ctx->client_user_info->client_user = sys_zalloc(len + 1);
+    if (mqtt_ctx->client_user_info->client_user == NULL) {
 #ifdef CONFIG_ATCMD
         app_print("client user malloc failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
 #else
@@ -119,16 +161,15 @@ int mqtt_client_user_set(char *new_client_user, int16_t len)
         return -2;
     }
 
-    sys_memcpy(client_user, new_client_user, len);
-    if (client_user[len] != 0) {
-        client_user[len] = 0;
+    sys_memcpy(mqtt_ctx->client_user_info->client_user, new_client_user, len);
+    if (mqtt_ctx->client_user_info->client_user[len] != 0) {
+        mqtt_ctx->client_user_info->client_user[len] = 0;
     }
-    base_client_user_info.client_user = client_user;
 
     return 0;
 }
 
-int mqtt_client_pass_set(char *new_client_pass, int16_t len)
+int mqtt_client_pass_set(mqtt_client_context_t *mqtt_ctx, char *new_client_pass, int16_t len)
 {
     if (new_client_pass == NULL) {
 #ifdef CONFIG_ATCMD
@@ -139,13 +180,12 @@ int mqtt_client_pass_set(char *new_client_pass, int16_t len)
         return -1;
     }
 
-    if (client_pass) {
-        sys_mfree(client_pass);
-        client_pass = NULL;
-        base_client_user_info.client_pass = NULL;
+    if (mqtt_ctx->client_user_info->client_pass) {
+        sys_mfree(mqtt_ctx->client_user_info->client_pass);
+        mqtt_ctx->client_user_info->client_pass = NULL;
     }
-    client_pass = sys_malloc(len + 1);
-    if (client_pass == NULL) {
+    mqtt_ctx->client_user_info->client_pass = sys_zalloc(len + 1);
+    if (mqtt_ctx->client_user_info->client_pass == NULL) {
 #ifdef CONFIG_ATCMD
         app_print("client password malloc failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
 #else
@@ -154,16 +194,15 @@ int mqtt_client_pass_set(char *new_client_pass, int16_t len)
         return -2;
     }
 
-    sys_memcpy(client_pass, new_client_pass, len);
-    if (client_pass[len] != 0) {
-        client_pass[len] = 0;
+    sys_memcpy(mqtt_ctx->client_user_info->client_pass, new_client_pass, len);
+    if (mqtt_ctx->client_user_info->client_pass[len] != 0) {
+        mqtt_ctx->client_user_info->client_pass[len] = 0;
     }
-    base_client_user_info.client_pass = client_pass;
 
     return 0;
 }
 
-int mqtt_client_conn_set(u16_t new_keep_alive, u8_t new_clean_session_disabled, char *new_will_topic, char *new_will_msg, u8_t new_will_qos, u8_t new_will_retain)
+int mqtt_client_conn_set(mqtt_client_context_t *mqtt_ctx, u16_t new_keep_alive, u8_t new_clean_session_disabled, char *new_will_topic, char *new_will_msg, u8_t new_will_qos, u8_t new_will_retain)
 {
     u8_t len;
 
@@ -175,14 +214,13 @@ int mqtt_client_conn_set(u16_t new_keep_alive, u8_t new_clean_session_disabled, 
 #endif
         return -1;
     }
-    if (will_topic) {
-        sys_mfree(will_topic);
-        will_topic = NULL;
-        base_client_user_info.will_topic = NULL;
+    if (mqtt_ctx->client_user_info->will_topic) {
+        sys_mfree(mqtt_ctx->client_user_info->will_topic);
+        mqtt_ctx->client_user_info->will_topic = NULL;
     }
     len = strlen(new_will_topic);
-    will_topic = sys_malloc(len + 1);
-    if (will_topic == NULL) {
+    mqtt_ctx->client_user_info->will_topic = sys_malloc(len + 1);
+    if (mqtt_ctx->client_user_info->will_topic == NULL) {
 #ifdef CONFIG_ATCMD
         app_print("will topic malloc failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
 #else
@@ -190,11 +228,10 @@ int mqtt_client_conn_set(u16_t new_keep_alive, u8_t new_clean_session_disabled, 
 #endif
         return -2;
     }
-    sys_memcpy(will_topic, new_will_topic, len);
-    if (will_topic[len] != 0) {
-        will_topic[len] = 0;
+    sys_memcpy(mqtt_ctx->client_user_info->will_topic, new_will_topic, len);
+    if (mqtt_ctx->client_user_info->will_topic[len] != 0) {
+        mqtt_ctx->client_user_info->will_topic[len] = 0;
     }
-    base_client_user_info.will_topic = will_topic;
 
     if (new_will_msg == NULL) {
 #ifdef CONFIG_ATCMD
@@ -202,50 +239,94 @@ int mqtt_client_conn_set(u16_t new_keep_alive, u8_t new_clean_session_disabled, 
 #else
         app_print("will message is NULL\r\n");
 #endif
-        sys_mfree(will_topic);
-        will_topic = NULL;
-        base_client_user_info.will_topic = NULL;
+        sys_mfree(mqtt_ctx->client_user_info->will_topic);
+        mqtt_ctx->client_user_info->will_topic = NULL;
         return -1;
     }
-    if (will_msg) {
-        sys_mfree(will_msg);
-        will_msg = NULL;
-        base_client_user_info.will_msg = NULL;
+    if (mqtt_ctx->client_user_info->will_msg) {
+        sys_mfree(mqtt_ctx->client_user_info->will_msg);
+        mqtt_ctx->client_user_info->will_msg = NULL;
     }
     len = strlen(new_will_msg);
-    will_msg = sys_malloc(len + 1);
-    if (will_msg == NULL) {
+    mqtt_ctx->client_user_info->will_msg = sys_malloc(len + 1);
+    if (mqtt_ctx->client_user_info->will_msg == NULL) {
 #ifdef CONFIG_ATCMD
         app_print("will message malloc failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
 #else
         app_print("will message malloc failed\r\n");
 #endif
-        sys_mfree(will_topic);
-        will_topic = NULL;
-        base_client_user_info.will_topic = NULL;
+        sys_mfree(mqtt_ctx->client_user_info->will_topic);
+        mqtt_ctx->client_user_info->will_topic = NULL;
         return -2;
     }
-    sys_memcpy(will_msg, new_will_msg, len);
-    if (will_msg[len] != 0) {
-        will_msg[len] = 0;
+    sys_memcpy(mqtt_ctx->client_user_info->will_msg, new_will_msg, len);
+    if (mqtt_ctx->client_user_info->will_msg[len] != 0) {
+        mqtt_ctx->client_user_info->will_msg[len] = 0;
     }
-    base_client_user_info.will_msg = will_msg;
 
-    keep_alive = new_keep_alive;
-    clean_session_disabled = new_clean_session_disabled;
-    will_qos = new_will_qos;
-    will_retain = new_will_retain;
-    base_client_user_info.keep_alive = keep_alive;
-    base_client_user_info.will_qos = will_qos;
-    base_client_user_info.will_retain = will_retain;
-    base_client_user_info.clean_session_disabled = clean_session_disabled;
+    mqtt_ctx->client_user_info->keep_alive = new_keep_alive;
+    mqtt_ctx->client_user_info->clean_session_disabled = new_clean_session_disabled;
+    mqtt_ctx->client_user_info->will_qos = new_will_qos;
+    mqtt_ctx->client_user_info->will_retain = new_will_retain;
 
     return 0;
 }
 
-char *mqtt_client_id_get()
+int mqtt_host_set(mqtt_client_context_t *mqtt_ctx, char *host, int16_t len)
 {
-    return (char *) (client_id);
+    if (host == NULL) {
+#ifdef CONFIG_ATCMD
+        app_print("host is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_HOST_IS_NULL);
+#else
+        app_print("host is NULL\r\n");
+#endif
+        return -1;
+    }
+
+    if (mqtt_ctx->mqtt_host) {
+        sys_mfree(mqtt_ctx->mqtt_host);
+        mqtt_ctx->mqtt_host = NULL;
+    }
+    mqtt_ctx->mqtt_host = sys_malloc(len + 1);
+    if (mqtt_ctx->mqtt_host == NULL) {
+#ifdef CONFIG_ATCMD
+        app_print("host malloc failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
+#else
+        app_print("host malloc failed\r\n");
+#endif
+        return -2;
+    }
+
+    sys_memcpy(mqtt_ctx->mqtt_host, host, len);
+    if (mqtt_ctx->mqtt_host[len] != 0) {
+        mqtt_ctx->mqtt_host[len] = 0;
+    }
+
+    return 0;
+}
+
+int mqtt_ssl_cfg(mqtt_client_context_t *mqtt_ctx)
+{
+    int ret = 0;
+
+    if (mqtt_ctx->tls_encry_mode == TLS_AUTH_MODE_CERT_2WAY) {
+        ret = mqtt_ssl_cfg_with_cert(mqtt_ctx->mqtt_client, (u8_t *)(mqtt_ctx->ca_cert), mqtt_ctx->ca_cert_len, (u8_t *)(mqtt_ctx->client_key), mqtt_ctx->client_key_len, (u8_t *)(mqtt_ctx->client_cert), mqtt_ctx->client_cert_len);
+    } else if (mqtt_ctx->tls_encry_mode == TLS_AUTH_MODE_CERT_1WAY) {
+        ret = mqtt_ssl_cfg_with_cert(mqtt_ctx->mqtt_client, (u8_t *)(mqtt_ctx->ca_cert), mqtt_ctx->ca_cert_len, NULL, 0, NULL, 0);
+    } else if (mqtt_ctx->tls_encry_mode == TLS_AUTH_MODE_KEY_SHARE) {
+        ret = mqtt_ssl_cfg_without_cert(mqtt_ctx->mqtt_client, NULL, 0, NULL, 0);
+    } else if (mqtt_ctx->tls_encry_mode == TLS_AUTH_MODE_PSK) {
+        ret = mqtt_ssl_cfg_without_cert(mqtt_ctx->mqtt_client, mqtt_ctx->psk, mqtt_ctx->psk_len, (const u8_t *)mqtt_ctx->psk_identity, mqtt_ctx->psk_identity_len);
+    } else if (mqtt_ctx->tls_encry_mode == TLS_AUTH_MODE_CERT_CLIENT_ONLY) {
+        ret = mqtt_ssl_cfg_with_cert(mqtt_ctx->mqtt_client, NULL, 0, (uint8_t *)(mqtt_ctx->client_key), mqtt_ctx->client_key_len, (uint8_t *)(mqtt_ctx->client_cert), mqtt_ctx->client_cert_len);
+    }
+
+    return ret;
+}
+
+char *mqtt_client_id_get(mqtt_client_context_t *mqtt_ctx)
+{
+    return (char *) (mqtt_ctx->client_user_info->client_id);
 }
 
 void mqtt_pub_cb(void *arg, err_t status)
@@ -321,6 +402,7 @@ void mqtt_receive_pub_msg_print(void *inpub_arg, const char *data, uint16_t payl
 
 void mqtt_connect_callback(mqtt_client_t *client, void *arg, mqtt_connection_status_t status)
 {
+    mqtt_client_context_t *mqtt_ctx = (mqtt_client_context_t *)arg;
     char *prefix = NULL;
     char *reason = NULL;
 
@@ -342,71 +424,113 @@ void mqtt_connect_callback(mqtt_client_t *client, void *arg, mqtt_connection_sta
             break;
     }
     app_print("%s%s, id is %d\r\n", prefix, reason, status);
-    if (mqtt_waiting_for_conn_cb) {
-        mqtt_waiting_for_conn_cb = false;
+    if (mqtt_ctx->waiting_for_conn_cb) {
+        mqtt_ctx->waiting_for_conn_cb = false;
     }
 
 resume_task:
-    mqtt_task_resume(false);
+    mqtt_task_resume(mqtt_ctx, false);
     return;
 }
 
 struct mqtt_connect_client_info_t* get_client_param_data_get(void)
 {
-    return &base_client_user_info;
-}
-
-void mqtt_client_info_init(void)
-{
-    base_client_user_info.client_id = client_id;
-    base_client_user_info.client_user = client_user;
-    base_client_user_info.client_pass = client_pass;
-    base_client_user_info.keep_alive = keep_alive;
-    base_client_user_info.will_topic = will_topic;
-    base_client_user_info.will_msg = will_msg;
-    base_client_user_info.will_qos = will_qos;
-    base_client_user_info.will_retain = will_retain;
-    base_client_user_info.clean_session_disabled = clean_session_disabled;
-}
-
-void client_user_info_free(void)
-{
-#ifdef CONFIG_ATCMD
-    if (base_client_user_info.client_id != NULL) {
-        sys_mfree(base_client_user_info.client_id);
+    extern mqtt_client_context_t *g_mqtt_ctx;
+    if (g_mqtt_ctx == NULL) {
+        return NULL;
     }
-    base_client_user_info.client_id = NULL;
-    client_id = NULL;
+    return g_mqtt_ctx->client_user_info;
+}
+
+void client_user_info_free(mqtt_client_context_t *mqtt_ctx)
+{
+    if (mqtt_ctx == NULL || mqtt_ctx->client_user_info == NULL) {
+        return;
+    }
+
+#ifdef CONFIG_ATCMD
+    if (mqtt_ctx->client_user_info->client_id != NULL) {
+        sys_mfree(mqtt_ctx->client_user_info->client_id);
+    }
+    mqtt_ctx->client_user_info->client_id = NULL;
 #endif
 
-    if (base_client_user_info.client_user != NULL) {
-        sys_mfree(base_client_user_info.client_user);
+    if (mqtt_ctx->client_user_info->client_user != NULL) {
+        sys_mfree(mqtt_ctx->client_user_info->client_user);
     }
-    base_client_user_info.client_user = NULL;
-    client_user = NULL;
+    mqtt_ctx->client_user_info->client_user = NULL;
 
-    if (base_client_user_info.client_pass != NULL) {
-        sys_mfree(base_client_user_info.client_pass);
+    if (mqtt_ctx->client_user_info->client_pass != NULL) {
+        sys_mfree(mqtt_ctx->client_user_info->client_pass);
     }
-    base_client_user_info.client_pass = NULL;
-    client_pass = NULL;
+    mqtt_ctx->client_user_info->client_pass = NULL;
 
     return;
 }
 
-void client_will_info_free(void)
+void client_will_info_free(mqtt_client_context_t *mqtt_ctx)
 {
-    if (base_client_user_info.will_topic != NULL) {
-        sys_mfree(base_client_user_info.will_topic);
+    if (mqtt_ctx == NULL || mqtt_ctx->client_user_info == NULL) {
+        return;
     }
-    base_client_user_info.will_topic = NULL;
-    will_topic = NULL;
 
-    if (base_client_user_info.will_msg != NULL) {
-        sys_mfree(base_client_user_info.will_msg);
+    if (mqtt_ctx->client_user_info->will_topic != NULL) {
+        sys_mfree(mqtt_ctx->client_user_info->will_topic);
     }
-    base_client_user_info.will_msg = NULL;
-    will_msg = NULL;
+    mqtt_ctx->client_user_info->will_topic = NULL;
+
+    if (mqtt_ctx->client_user_info->will_msg != NULL) {
+        sys_mfree(mqtt_ctx->client_user_info->will_msg);
+    }
+    mqtt_ctx->client_user_info->will_msg = NULL;
+
+    return;
+}
+
+void mqtt_host_free(mqtt_client_context_t *mqtt_ctx)
+{
+    if (mqtt_ctx->mqtt_host != NULL) {
+        sys_mfree(mqtt_ctx->mqtt_host);
+        mqtt_ctx->mqtt_host = NULL;
+    }
+}
+
+void mqtt_resource_free(mqtt_client_context_t *mqtt_ctx)
+{
+    if (mqtt_ctx == NULL || mqtt_ctx->mqtt_client == NULL) {
+        return;
+    }
+    mqtt_ssl_cfg_free(mqtt_ctx->mqtt_client);
+    mqtt_host_free(mqtt_ctx);
+    at_topic_sub_list_free(mqtt_ctx);
+    extern void mqtt5_param_delete(mqtt_client_t *mqtt_client);
+    mqtt5_param_delete(mqtt_ctx->mqtt_client);
+    mqtt_client_free(mqtt_ctx->mqtt_client);
+    mqtt_ctx->mqtt_client = NULL;
+
+    return;
+}
+
+void mqtt_info_free(mqtt_client_context_t *mqtt_ctx)
+{
+    if (mqtt_ctx == NULL || mqtt_ctx->client_user_info == NULL) {
+        return;
+    }
+    client_user_info_free(mqtt_ctx);
+    client_will_info_free(mqtt_ctx);
+    sys_mfree(mqtt_ctx->client_user_info);
+    mqtt_ctx->client_user_info = NULL;
+
+    return;
+}
+
+void mqtt_context_free(mqtt_client_context_t **mqtt_ctx)
+{
+    if (mqtt_ctx == NULL || *mqtt_ctx == NULL) {
+        return;
+    }
+    sys_mfree(*mqtt_ctx);
+    *mqtt_ctx = NULL;
 
     return;
 }

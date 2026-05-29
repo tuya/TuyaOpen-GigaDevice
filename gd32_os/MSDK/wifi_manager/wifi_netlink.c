@@ -813,7 +813,7 @@ int wifi_netlink_ap_start(int vif_idx, struct ap_cfg *cfg)
     struct ap_cfg *ap_cfg;
     struct wifi_ip_addr_cfg ip_cfg;
     int res = 0;
-    uint8_t soft_ap_ip_segment = 237; // Default softap IP segment
+    uint8_t soft_ap_ip_segment = 176; // Default softap IP segment
 
     if (vif_idx >= CFG_VIF_NUM)
         return -1;

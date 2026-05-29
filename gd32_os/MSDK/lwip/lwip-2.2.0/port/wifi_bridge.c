@@ -50,10 +50,21 @@ extern int packet_to_spi(unsigned char *buf, unsigned int len);
 #define WIFI_BRIDGE_MODE_BRIDGE 1  /* Forward to SPI only               */
 #define WIFI_BRIDGE_MODE_TEST   2  /* Both SPI and LwIP paths active    */
 
-/* Set to 1 to only forward IPv4 ICMP frames to SPI (test filter).
- * All non-ICMP frames still follow the LwIP path normally.
- * Set to 0 to forward all frame types (production behaviour).           */
-#define WIFI_BRIDGE_ICMP_FILTER_TEST  1
+/* When enabled, DHCP packets (UDP port 67/68) received in BRIDGE/TEST mode
+ * are NOT forwarded to the master MCU via SPI; they are handled locally by
+ * GD32's own LwIP stack so that IP address negotiation always succeeds.
+ * Define to 0 to disable (all packets including DHCP go to the SPI path). */
+#ifndef WIFI_BRIDGE_DHCP_LOCAL_HANDLE
+#define WIFI_BRIDGE_DHCP_LOCAL_HANDLE  1
+#endif
+
+/* When enabled, EAPOL (802.1X) packets (EtherType 0x888E) received in
+ * BRIDGE/TEST mode are NOT forwarded to the master MCU via SPI; they are
+ * handled locally by GD32's own LwIP/security stack.
+ * Define to 0 to disable. */
+#ifndef WIFI_BRIDGE_EAPOL_LOCAL_HANDLE
+#define WIFI_BRIDGE_EAPOL_LOCAL_HANDLE  1
+#endif
 
 static volatile int   g_bridge_mode = WIFI_BRIDGE_MODE_SELF;
 
@@ -62,47 +73,6 @@ static netif_input_fn g_orig_input  = NULL;
 
 /* STA network interface handle — set by wifi_trx_hook_init */
 static struct netif  *g_sta_netif   = NULL;
-
-/* -----------------------------------------------------------------------
- * wifi_bridge_is_icmp -- test whether a pbuf carries an IPv4 ICMP frame.
- *
- * Uses pbuf_get_at() so it works correctly on both single-segment and
- * chained pbufs without requiring a linearise step.
- *
- * Ethernet frame layout (offsets from payload[0]):
- *   [0..5]  dst MAC
- *   [6..11] src MAC
- *   [12-13] EtherType  (0x0800 = IPv4)
- *   [14..]  IPv4 header
- *   [14+9]  = [23] IP protocol  (0x01 = ICMP)
- *
- * Returns 1 if frame is IPv4 ICMP, 0 otherwise.
- * ----------------------------------------------------------------------- */
-#if defined(WIFI_BRIDGE_ICMP_FILTER_TEST) && (WIFI_BRIDGE_ICMP_FILTER_TEST == 1)
-static int wifi_bridge_is_icmp(struct pbuf *p)
-{
-    /* Minimum: 14 (Ethernet) + 10 bytes into IPv4 header = 24 bytes */
-    if (p->tot_len < 24U) {
-        return 0;
-    }
-    /* EtherType: must be 0x0800 (IPv4) */
-    if (pbuf_get_at(p, 12U) != 0x08U || pbuf_get_at(p, 13U) != 0x00U) {
-        return 0;
-    }
-    /* IPv4 Protocol field at offset 23: 0x01 = ICMP */
-    return (pbuf_get_at(p, 23U) == 0x01U);
-}
-
-static int wifi_bridge_is_arp(struct pbuf *p)
-{
-    /* Minimum Ethernet header: 14 bytes */
-    if (p->tot_len < 14U) {
-        return 0;
-    }
-    /* EtherType: 0x0806 = ARP */
-    return (pbuf_get_at(p, 12U) == 0x08U && pbuf_get_at(p, 13U) == 0x06U);
-}
-#endif /* WIFI_BRIDGE_ICMP_FILTER_TEST */
 
 /* -----------------------------------------------------------------------
  * wifi_bridge_rx_free_cb -- LwIP custom-pbuf free callback.
@@ -190,6 +160,113 @@ static int wifi_bridge_forward_to_spi(struct pbuf *p)
 }
 
 /* -----------------------------------------------------------------------
+ * Local-only packet filter — table-driven, extensible.
+ *
+ * Rule descriptor:
+ *   ethertype   : required Ethernet type field to match
+ *   ip_proto    : 0  = EtherType match only (e.g. EAPOL, ARP)
+ *                 17 = also match UDP src/dst port range below
+ *   udp_port_lo : inclusive lower bound of UDP port range (ip_proto != 0)
+ *   udp_port_hi : inclusive upper bound of UDP port range (ip_proto != 0)
+ *
+ * To add a new locally-handled protocol, append one line to g_local_rules[].
+ * No other code needs to change.
+ *
+ * Examples:
+ *   { 0x888EU, 0U,   0U,   0U   }  -- EAPOL  (802.1X)
+ *   { 0x0806U, 0U,   0U,   0U   }  -- ARP
+ *   { 0x0800U, 17U,  67U,  68U  }  -- DHCP   (IPv4/UDP 67-68)
+ *   { 0x0800U, 17U, 123U, 123U  }  -- NTP    (IPv4/UDP 123)
+ * ----------------------------------------------------------------------- */
+typedef struct {
+    uint16_t ethertype;    /* Ethernet type to match (required)              */
+    uint8_t  ip_proto;     /* IP protocol; 0 = no IP/UDP check needed        */
+    uint16_t udp_port_lo;  /* UDP port range lower bound (inclusive)         */
+    uint16_t udp_port_hi;  /* UDP port range upper bound (inclusive)         */
+} wb_local_rule_t;
+
+static const wb_local_rule_t g_local_rules[] = {
+#if WIFI_BRIDGE_EAPOL_LOCAL_HANDLE
+    { 0x888EU, 0U,  0U,  0U  },  /* EAPOL (IEEE 802.1X)       */
+#endif
+#if WIFI_BRIDGE_DHCP_LOCAL_HANDLE
+    { 0x0800U, 17U, 67U, 68U },  /* DHCP  (IPv4/UDP port 67-68) */
+#endif
+};
+
+#define WB_LOCAL_RULES_COUNT  ((int)(sizeof(g_local_rules) / sizeof(g_local_rules[0])))
+
+/* -----------------------------------------------------------------------
+ * wifi_bridge_is_local_only -- returns non-zero if the packet matches any
+ * entry in g_local_rules[] and should be handled locally by GD32's LwIP.
+ *
+ * Optimisations:
+ *   - When WB_LOCAL_RULES_COUNT == 0 (all macros off) the compiler
+ *     eliminates the entire body via dead-code removal.
+ *   - Single-segment fast path: p->payload cast directly — no per-byte
+ *     pbuf_get_at() overhead for the common contiguous WiFi RX buffer.
+ *   - EtherType is read exactly once and shared across all rule iterations.
+ * ----------------------------------------------------------------------- */
+static int wifi_bridge_is_local_only(struct pbuf *p)
+{
+    const uint8_t  *hdr;
+    uint16_t        ethertype;
+    int             i;
+
+    if (WB_LOCAL_RULES_COUNT == 0 || p->tot_len < 14U) {
+        return 0;
+    }
+
+    /* Fast path: single contiguous segment — direct pointer access */
+    hdr = (p->next == NULL) ? (const uint8_t *)p->payload : NULL;
+
+    /* Read EtherType once; shared by every rule in the loop below */
+    ethertype = (hdr != NULL)
+                    ? (((uint16_t)hdr[12] << 8) | hdr[13])
+                    : (((uint16_t)pbuf_get_at(p, 12U) << 8) |
+                        (uint16_t)pbuf_get_at(p, 13U));
+
+    for (i = 0; i < WB_LOCAL_RULES_COUNT; i++) {
+        const wb_local_rule_t *r = &g_local_rules[i];
+
+        if (ethertype != r->ethertype) {
+            continue;
+        }
+        if (r->ip_proto == 0U) {
+            return 1;  /* EtherType-only match (e.g. EAPOL) */
+        }
+
+        /* IPv4/UDP port range check */
+        if (p->tot_len >= 42U) {
+            uint8_t proto = (hdr != NULL) ? hdr[23] : pbuf_get_at(p, 23U);
+            if (proto == r->ip_proto) {
+                uint8_t  ihl    = ((hdr != NULL) ? hdr[14] : pbuf_get_at(p, 14U)) & 0x0FU;
+                if (ihl >= 5U) {
+                    uint16_t udp_off = 14U + (uint16_t)ihl * 4U;
+                    if (p->tot_len >= (uint16_t)(udp_off + 8U)) {
+                        uint16_t udp_src, udp_dst;
+                        if (hdr != NULL) {
+                            udp_src = ((uint16_t)hdr[udp_off]      << 8) | hdr[udp_off + 1U];
+                            udp_dst = ((uint16_t)hdr[udp_off + 2U] << 8) | hdr[udp_off + 3U];
+                        } else {
+                            udp_src = ((uint16_t)pbuf_get_at(p, udp_off)      << 8) |
+                                       (uint16_t)pbuf_get_at(p, udp_off + 1U);
+                            udp_dst = ((uint16_t)pbuf_get_at(p, udp_off + 2U) << 8) |
+                                       (uint16_t)pbuf_get_at(p, udp_off + 3U);
+                        }
+                        if ((udp_src >= r->udp_port_lo && udp_src <= r->udp_port_hi) ||
+                            (udp_dst >= r->udp_port_lo && udp_dst <= r->udp_port_hi)) {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* -----------------------------------------------------------------------
  * Internal: WiFi RX intercept hook.
  *
  * Replaces netif->input; called from the LwIP tcpip_thread context.
@@ -197,9 +274,11 @@ static int wifi_bridge_forward_to_spi(struct pbuf *p)
  *
  * BRIDGE mode:  pbuf consumed + freed here (custom_free_function reclaims
  *               the buffer to the WiFi driver).
- * TEST mode:    Forward to SPI first (packet_to_spi copies the payload),
- *               then g_orig_input takes ownership of the original pbuf so
- *               LwIP processes it too — no extra copy needed.
+ *               EXCEPTION: locally-handled packets (DHCP, EAPOL, ...) are
+ *               never forwarded to the master MCU; they go to GD32's own
+ *               LwIP stack for IP negotiation and 802.1X authentication.
+ * TEST mode:    Local-only packets skip the SPI path and go to LwIP only.
+ *               Non-local: SPI first (copy), then g_orig_input takes pbuf.
  * SELF mode:    pbuf passed directly to the original tcpip_input.
  * ----------------------------------------------------------------------- */
 static err_t wifi_bridge_input(struct pbuf *p, struct netif *netif)
@@ -209,22 +288,24 @@ static err_t wifi_bridge_input(struct pbuf *p, struct netif *netif)
     }
 
     if (g_bridge_mode == WIFI_BRIDGE_MODE_BRIDGE) {
-        /* ----- BRIDGE mode: SPI only ----- */
-#if defined(WIFI_BRIDGE_ICMP_FILTER_TEST) && (WIFI_BRIDGE_ICMP_FILTER_TEST == 1)
-        if (wifi_bridge_is_icmp(p) || wifi_bridge_is_arp(p)) {
-            wifi_bridge_forward_to_spi(p);
+        /* ----- BRIDGE mode: SPI only (matched local rules go to LwIP) ----- */
+        if (wifi_bridge_is_local_only(p)) {
+            if (g_orig_input != NULL) {
+                return g_orig_input(p, netif);
+            }
+            pbuf_free(p);
+            return 0;
         }
-        /* Non-ICMP/ARP: still consumed here, not passed to LwIP in BRIDGE mode */
-#else
         wifi_bridge_forward_to_spi(p);
-#endif
         pbuf_free(p); /* reclaims WiFi driver buffer via custom_free_function */
         return 0;
     }
 
     if (g_bridge_mode == WIFI_BRIDGE_MODE_TEST) {
-        /* ----- TEST mode: SPI first (copy), then LwIP takes original pbuf ----- */
-        wifi_bridge_forward_to_spi(p);
+        /* ----- TEST mode: matched local rules skip SPI; LwIP gets all ----- */
+        if (!wifi_bridge_is_local_only(p)) {
+            wifi_bridge_forward_to_spi(p);
+        }
         if (g_orig_input != NULL) {
             return g_orig_input(p, netif); /* LwIP owns p, will call pbuf_free */
         }

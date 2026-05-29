@@ -455,7 +455,7 @@ static void mgmt_connected_scan_done(wifi_management_sm_data_t *sm)
     }
 
 #ifdef CFG_80211R
-    if(ft_roaming) {
+    if (ft_roaming) {
         wifi_sm_printf(WIFI_SM_NOTICE, STATE_MACHINE_DEBUG_PREFIX ": try FT roaming to a better AP\r\n");
         sm->polling_scan_count = 0;
         eloop_timeout_cancel(mgmt_link_status_polling, ELOOP_ALL_CTX, ELOOP_ALL_CTX);
@@ -479,7 +479,6 @@ static void mgmt_connected_scan_done(wifi_management_sm_data_t *sm)
                     (uint8_t *)target_ap, sizeof(struct mac_scan_result))) {
                 sys_mfree(target_ap);
             }
-            sys_mfree(target_ap);
         } else {
             wifi_sm_printf(WIFI_SM_NOTICE, STATE_MACHINE_DEBUG_PREFIX ": the targe ap isn't good enough(%d - %d < %d)\r\n",
                 candidate.rssi, rssi, WIFI_MGMT_ROAMING_RSSI_RELATIVE_GAIN);
@@ -2421,6 +2420,8 @@ int wifi_management_init(void)
         return -1;
     }
 
+    wifi_eloop_init();
+
     wifi_mgmt_task_tcb = (os_task_t)sys_task_create(NULL, (const uint8_t *)"wifi_mgmt", NULL,
                     MGMT_TASK_STACK_SIZE, MGMT_TASK_QUEUE_SIZE, MGMT_TASK_QUEUE_ITEM_SIZE,
                     MGMT_TASK_PRIORITY, (task_func_t)wifi_management_task, NULL);
@@ -2428,8 +2429,6 @@ int wifi_management_init(void)
         netlink_printf("Create wifi management task failed.\r\n");
         return -2;
     }
-
-    wifi_eloop_init();
 
     /* Wifi management sm init */
     eloop_event_send(WIFI_VIF_INDEX_DEFAULT, WIFI_MGMT_EVENT_INIT);

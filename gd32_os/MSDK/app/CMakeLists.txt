@@ -11,5 +11,9 @@ target_sources(${TARGET_EXE}
         mqtt_app/mqtt_cmd.c
         ota_demo.c
         ping.c
-        iap_command.c
+        mm_app/mm_cmd_parse.c
+        mm_app/mm_icc.c
+        mm_app/mm_keepalive.c
+        mm_app/mm_mqtt.c
+        mm_app/mm_spi.c
     )

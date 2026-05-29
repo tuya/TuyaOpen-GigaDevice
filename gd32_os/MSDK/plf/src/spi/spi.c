@@ -81,7 +81,6 @@ void spi_dma_single_mode_config(uint32_t direction)
 
 uint8_t spi_dma_tx_dummy = 0x7e;//0x12;
 uint8_t spi_dma_rx_dummy = 0x02;
-
 void spi_dma_dummy_mode_config(uint32_t direction)
 {
     dma_single_data_parameter_struct dma_init_struct;

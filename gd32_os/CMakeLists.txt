@@ -23,8 +23,6 @@ include_directories(
     MSDK/plf/src
     MSDK/macsw/export
     MSDK/app
-    MSDK/app/play_music/mp3
-    MSDK/app/play_music/codec_driver
     MSDK/util/include
 )
 

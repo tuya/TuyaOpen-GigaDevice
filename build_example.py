@@ -12,7 +12,21 @@ import shutil
 
 def clean(root):
     shutil.rmtree("build", ignore_errors=True)
-    pass
+    for clean_dir in [
+        os.path.join(root, "gd32_os", "MSDK", "projects", "cmake", "output"),
+        os.path.join(root, "gd32_os", "MBL", "project", "cmake", "bin"),
+    ]:
+        if os.path.exists(clean_dir):
+            shutil.rmtree(clean_dir, ignore_errors=True)
+            print(f"Cleaned: {clean_dir}")
+    images_dir = os.path.join(root, "gd32_os", "scripts", "images")
+    if os.path.exists(images_dir):
+        for entry in os.scandir(images_dir):
+            if entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.path, ignore_errors=True)
+            else:
+                os.remove(entry.path)
+        print(f"Cleaned contents: {images_dir}")
 
 def parser_para_file(json_file):
     if not os.path.isfile(json_file):

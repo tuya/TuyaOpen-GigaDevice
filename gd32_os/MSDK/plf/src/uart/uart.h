@@ -170,7 +170,7 @@ extern "C" {
 #define BAUDRATE_921600         921600
 #define BAUDRATE_2000000        2000000
 
-#define DEFAULT_LOG_BAUDRATE    BAUDRATE_115200
+#define DEFAULT_LOG_BAUDRATE    BAUDRATE_921600
 
 #define UART_BUFFER_SIZE        128
 #define MAX_ARGC                16

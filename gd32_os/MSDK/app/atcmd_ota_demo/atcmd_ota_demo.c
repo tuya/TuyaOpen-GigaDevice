@@ -137,10 +137,16 @@ OF SUCH DAMAGE.
 #define TLS_VERIFY_CLI_CERT                     1
 
 
-#if (TLS_VERIFY_SRV_CERT || TLS_VERIFY_CLI_CERT)
-#define TLS_CRT_USED
-#include "atcmd_ota_certs.c"
-#endif
+// #if (TLS_VERIFY_SRV_CERT || TLS_VERIFY_CLI_CERT)
+// #define TLS_CRT_USED
+// #endif
+extern const char mqtt_ecs_ca_crt[];
+extern const char mqtt_ecs_cli_crt[];
+extern const char mqtt_ecs_cli_key[];
+extern const size_t mqtt_ecs_ca_crt_len;
+extern const size_t mqtt_ecs_cli_crt_len;
+extern const size_t mqtt_ecs_cli_key_len;
+
 /*========== OTA Definitions ========*/
 
 
@@ -212,6 +218,8 @@ typedef struct {
 static int ssl_debug_level;
 
 ota_ctx_t *g_ota_ctx_ptr = NULL;
+
+extern mqtt_client_context_t *g_mqtt_ctx;
 
 
 /*!
@@ -557,7 +565,7 @@ static void at_indicate_ota_progress(int state, int percent)
     AT_RSP_IMMEDIATE();
     AT_RSP_FREE();
 
-    mqtt_client_t *at_mqtt_client = mqtt_client_get();
+    mqtt_client_t *at_mqtt_client = g_mqtt_ctx->mqtt_client;
     if (at_mqtt_client != NULL &&  mqtt_client_is_connected(at_mqtt_client)) {
         // publish OTA Progress to MQTT Broker
         char *pub_ota_msg = sys_zalloc(msg_len);
@@ -573,9 +581,9 @@ static void at_indicate_ota_progress(int state, int percent)
             snprintf(pub_ota_msg, msg_len, "{\"status\":\"completed\"}");
 
         if (strncmp(g_ota_ctx_ptr->fw_name, "VW553", 5) == 0)
-            at_mqtt_msg_pub(ALI_ECS_PUB_TOPIC_OTA_VW553_STATUS, pub_ota_msg, strlen(pub_ota_msg), 0, 0);
+            at_mqtt_msg_pub(g_mqtt_ctx, ALI_ECS_PUB_TOPIC_OTA_VW553_STATUS, pub_ota_msg, strlen(pub_ota_msg), 0, 0);
         else if (strncmp(g_ota_ctx_ptr->fw_name, "MUSIC", 5) == 0)
-            at_mqtt_msg_pub(ALI_ECS_PUB_TOPIC_OTA_MUSIC_STATUS, pub_ota_msg, strlen(pub_ota_msg), 0, 0);
+            at_mqtt_msg_pub(g_mqtt_ctx, ALI_ECS_PUB_TOPIC_OTA_MUSIC_STATUS, pub_ota_msg, strlen(pub_ota_msg), 0, 0);
         sys_mfree(pub_ota_msg);
     } else {
         if (at_mqtt_client == NULL)
@@ -723,7 +731,7 @@ int at_ota_demo_ssl_client(ota_ssl_wrapper_t *ota_ssl, int verify_server)
 #if TLS_VERIFY_SRV_CERT
     if (verify_server) {
         /* Setup server's CA cert chain */
-        ret = mbedtls_x509_crt_parse(&ota_ssl->ca_cert, (const unsigned char *)ecs_ca_crt, strlen(ecs_ca_crt) + 1);
+        ret = mbedtls_x509_crt_parse(&ota_ssl->ca_cert, (const unsigned char *)mqtt_ecs_ca_crt, strlen(mqtt_ecs_ca_crt) + 1);
         if (ret < 0) {
             AT_TRACE("AT+CIUPDATE: Failed to parse CA certificate chain: -0x%x\n", -ret);
             ret = OTA_SERVER_ACCESS_ERR;
@@ -736,7 +744,7 @@ int at_ota_demo_ssl_client(ota_ssl_wrapper_t *ota_ssl, int verify_server)
 #if TLS_VERIFY_CLI_CERT
     AT_TRACE("  . Loading the Client certificate ...\r\n");
 
-    ret = mbedtls_x509_crt_parse(&ota_ssl->cli_cert, (const unsigned char *)ecs_cli_crt, strlen(ecs_cli_crt) + 1);
+    ret = mbedtls_x509_crt_parse(&ota_ssl->cli_cert, (const unsigned char *)mqtt_ecs_cli_crt, strlen(mqtt_ecs_cli_crt) + 1);
     if (ret < 0) {
         AT_TRACE(" AT+CIUPDATE: failed\r\n  ! mbedtls_x509_crt_parse returned -0x%x\r\n", -ret);
         goto exit;
@@ -746,9 +754,9 @@ int at_ota_demo_ssl_client(ota_ssl_wrapper_t *ota_ssl, int verify_server)
 
     AT_TRACE("  . Loading the Client key ...\r\n");
 #if  (MBEDTLS_VERSION_NUMBER != MBEDTLS_VER_2_17_0)
-    ret = mbedtls_pk_parse_key(&ota_ssl->cli_key, (const unsigned char *)ecs_cli_key, strlen(ecs_cli_key) + 1, NULL, 0, my_random, 0);
+    ret = mbedtls_pk_parse_key(&ota_ssl->cli_key, (const unsigned char *)mqtt_ecs_cli_key, strlen(mqtt_ecs_cli_key) + 1, NULL, 0, my_random, 0);
 #else
-    ret = mbedtls_pk_parse_key(&ota_ssl->cli_key, (const unsigned char *)ecs_cli_key, strlen(ecs_cli_key) + 1, NULL, 0);
+    ret = mbedtls_pk_parse_key(&ota_ssl->cli_key, (const unsigned char *)mqtt_ecs_cli_key, strlen(mqtt_ecs_cli_key) + 1, NULL, 0);
 #endif
     if (ret < 0) {
         AT_TRACE("AT+CIUPDATE: failed\r\n  !  mbedtls_pk_parse_key returned -0x%x\r\n", -ret);
@@ -1136,9 +1144,6 @@ Error1:
     if (ota_ssl)
         sys_mfree(ota_ssl);
 
-    if (http_response)
-        sys_mfree(http_response);
-
     sys_task_delete(NULL);
 }
 
@@ -1321,7 +1326,7 @@ void at_ota_demo_recv_sub_msg_cb(void *inpub_arg, const uint8_t *data, uint16_t 
     return;
 }
 
-static int at_mqtt_connect(int argc, char **argv)
+static int at_mqtt_connect(mqtt_client_context_t *mqtt_ctx, int argc, char **argv)
 {
     uint32_t port;
     uint8_t state, reconnect = 1;
@@ -1361,31 +1366,44 @@ static int at_mqtt_connect(int argc, char **argv)
         goto Error;
     }
 
-    if (mqtt_client_id_set(client_id, strlen(client_id)) != 0) {
+    if (mqtt_client_id_set(mqtt_ctx, client_id, strlen(client_id)) != 0) {
         ret = AT_MQTT_CLIENT_ID_READ_FAILED;
         AT_TRACE("MQTT: client id set failed\r\n");
         goto Error;
     }
-    if (mqtt_client_user_set(username, strlen(username)) != 0) {
+    if (mqtt_client_user_set(mqtt_ctx, username, strlen(username)) != 0) {
         ret = AT_MQTT_USERNAME_READ_FAILED;
         AT_TRACE("MQTT: user name set failed\r\n");
         goto Error;
     }
-    if (mqtt_client_pass_set(password, strlen(password)) != 0) {
+    if (mqtt_client_pass_set(mqtt_ctx, password, strlen(password)) != 0) {
         ret = AT_MQTT_PASSWORD_READ_FAILED;
         AT_TRACE("MQTT: user password set failed\r\n");
         goto Error;
     }
 
-    bool at_ota_enabled = true;
-    if ((ret = at_mqtt_connect_server(host, port, reconnect, at_ota_enabled)) == 0) {
+    if (mqtt_host_set(mqtt_ctx, host, strlen(host)) != 0) {
+        ret = AT_MQTT_HOST_READ_FAILED;
+        AT_TRACE("MQTT: host set failed\r\n");
+        goto Error;
+    }
+
+    mqtt_ctx->port = port;
+    mqtt_ctx->auto_reconnect = reconnect;
+    mqtt_ctx->ca_cert = mqtt_ecs_ca_crt;
+    mqtt_ctx->ca_cert_len = mqtt_ecs_ca_crt_len;
+    mqtt_ctx->client_cert = mqtt_ecs_cli_crt;
+    mqtt_ctx->client_cert_len = mqtt_ecs_cli_crt_len;
+    mqtt_ctx->client_key = mqtt_ecs_cli_key;
+    mqtt_ctx->client_key_len = mqtt_ecs_cli_key_len;
+    if ((ret = at_mqtt_connect_server(mqtt_ctx)) == 0) {
         uint32_t connect_time = sys_current_time_get();
         while (sys_current_time_get() - connect_time <= MQTT_LINK_TIME_LIMIT * 2) {
-            mqtt_client_t *at_mqtt_client = mqtt_client_get();
+            mqtt_client_t *at_mqtt_client = mqtt_ctx->mqtt_client;
             if (at_mqtt_client != NULL &&  mqtt_client_is_connected(at_mqtt_client)) {
-                mqtt_set_inpub_callback(at_mqtt_client, at_ota_demo_recv_sub_topic_cb, at_ota_demo_recv_sub_msg_cb, client_user_info_get());
+                mqtt_set_inpub_callback(at_mqtt_client, at_ota_demo_recv_sub_topic_cb, at_ota_demo_recv_sub_msg_cb, mqtt_ctx->client_user_info);
                 AT_RSP_START(256);
-                AT_RSP("+MQTTCONNECTED:0,%d,\"%s\",%d,%d\r\n", mqtt_scheme_get(), host, port, reconnect);
+                AT_RSP("+MQTTCONNECTED:0,%d,\"%s\",%d,%d\r\n", mqtt_ctx->mqtt_scheme, mqtt_ctx->mqtt_host, mqtt_ctx->port, mqtt_ctx->auto_reconnect);
                 AT_RSP_OK();
                 AT_TRACE("MQTT: connect success\r\n");
                 ret = 0;
@@ -1427,10 +1445,18 @@ void at_ota_demo_start(int argc, char **argv)
 
     using_tls = (uint32_t)strtoul((const char *)argv[1], &endptr, 0);
 
+    if (g_mqtt_ctx == NULL) {
+        g_mqtt_ctx = mqtt_client_context_init();
+        if (g_mqtt_ctx == NULL) {
+            AT_TRACE("MQTT: context init failed\r\n");
+            goto Error;
+        }
+    }
+
     if (using_tls > 0)
-        mqtt_scheme_set(5);
+        g_mqtt_ctx->mqtt_scheme = 5;
     else
-        mqtt_scheme_set(1);
+        g_mqtt_ctx->mqtt_scheme = 1;
 /*
     while (wvif->sta.state != WIFI_STA_STATE_CONNECTED) {
         app_print("Wi-Fi connect with %s ...\r\n", SSID);
@@ -1442,7 +1468,7 @@ void at_ota_demo_start(int argc, char **argv)
     }
 */
     /* 1. connect to mqtt server, */
-    err = at_mqtt_connect(0, NULL);
+    err = at_mqtt_connect(g_mqtt_ctx, 0, NULL);
     if (err) {
         AT_TRACE("AT+OTADEMO: mqtt connect failed, err=%d\r\n", err);
         goto Error;
@@ -1453,25 +1479,25 @@ void at_ota_demo_start(int argc, char **argv)
     AT_RSP_OK();
 
     /* 2. subscribe OTA topic， wildcast char is '+' */
-    at_mqtt_msg_sub(ALI_ECS_SUB_TOPIC_OTA_VW553, 0, 1);
+    at_mqtt_msg_sub(g_mqtt_ctx, ALI_ECS_SUB_TOPIC_OTA_VW553, 0, 1);
 
     /* 3. subscribe RESET topic */
-    at_mqtt_msg_sub(ALI_ECS_SUB_TOPIC_SYSTEM_RESET, 0, 1);
+    at_mqtt_msg_sub(g_mqtt_ctx, ALI_ECS_SUB_TOPIC_SYSTEM_RESET, 0, 1);
 
     /* 4. subscribe LED turn on/off topic */
-    at_mqtt_msg_sub(ALI_ECS_SUB_TOPIC_SYSTEM_LED, 0, 1);
+    at_mqtt_msg_sub(g_mqtt_ctx, ALI_ECS_SUB_TOPIC_SYSTEM_LED, 0, 1);
 
     /* 5. Publish WiFi status*/
     pub_msg = sys_zalloc(msg_len);
     if (pub_msg == NULL) {
         AT_TRACE("AT+OTADEMO: malloc pub_wifi_msg failed\r\n");
-        return;
+        goto Error;
     }
     if (wvif->sta.state == WIFI_STA_STATE_CONNECTED) {
         snprintf(pub_msg, msg_len, "{\"connected\":1,\"ssid\":\"%s\", \"rssi\":%d}",
             wvif->sta.cfg.ssid,
             macif_vif_sta_rssi_get(WIFI_VIF_INDEX_DEFAULT));
-        at_mqtt_msg_pub(ALI_ECS_PUB_TOPIC_WIFI_STATUS, pub_msg, strlen(pub_msg), 0, 0);
+        at_mqtt_msg_pub(g_mqtt_ctx, ALI_ECS_PUB_TOPIC_WIFI_STATUS, pub_msg, strlen(pub_msg), 0, 0);
     } else {
         snprintf(pub_msg, msg_len, "{\"connected\":0}");
     }
@@ -1483,7 +1509,7 @@ void at_ota_demo_start(int argc, char **argv)
     } else {
         snprintf(pub_msg, msg_len, "{\"on\":false}");
     }
-    at_mqtt_msg_pub(ALI_ECS_PUB_TOPIC_SYSTEM_LED_STATUS, pub_msg, strlen(pub_msg), 0, 0);
+    at_mqtt_msg_pub(g_mqtt_ctx, ALI_ECS_PUB_TOPIC_SYSTEM_LED_STATUS, pub_msg, strlen(pub_msg), 0, 0);
 
 
     sys_memset(pub_msg, 0, msg_len);
@@ -1495,13 +1521,18 @@ void at_ota_demo_start(int argc, char **argv)
                 (RE_IMG_VERSION >> 12) & 0xFF,
                 RE_IMG_VERSION & 0xFFF);
 
-    at_mqtt_msg_pub(ALI_ECS_PUB_TOPIC_SYSTEM_VERSION, pub_msg, strlen(pub_msg), 0, 0);
+    at_mqtt_msg_pub(g_mqtt_ctx, ALI_ECS_PUB_TOPIC_SYSTEM_VERSION, pub_msg, strlen(pub_msg), 0, 0);
 
     if (pub_msg)
         sys_mfree(pub_msg);
 
     return;
 Error:
+    mqtt_resource_free(g_mqtt_ctx);
+    mqtt_info_free(g_mqtt_ctx);
+    mqtt_context_free(&g_mqtt_ctx);
+    g_mqtt_ctx = NULL;
+
     AT_RSP_ERR();
     return;
 Usage:

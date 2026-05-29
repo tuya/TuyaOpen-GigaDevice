@@ -292,8 +292,9 @@ char uart_getc(uint32_t uart_id)
 extern void tuya_uart_irq_hdl(uint32_t uart);
 void uart_irq_hdl(uint32_t uart)
 {
+#ifdef TUYAOS_SUPPORT
     tuya_uart_irq_hdl(uart);
-#ifdef CONFIG_BASECMD
+#else
     uint8_t i;
 
     for (i = 0; i < MAX_UART_NUM; i++) {

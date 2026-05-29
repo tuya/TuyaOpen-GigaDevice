@@ -63,6 +63,14 @@ OF SUCH DAMAGE.
 #include "ble_uart.h"
 #endif
 
+#ifdef CONFIG_PLATFORM_FPGA
+#define RTC_CLOCK_SOURCE_HXTAL_DIV_RTCDIV
+#elif CONFIG_BOARD == PLATFORM_BOARD_32VW55X_START
+#define RTC_CLOCK_SOURCE_IRC32K
+#else
+#define RTC_CLOCK_SOURCE_LXTAL
+#endif
+
 // Indicate WiFi is existed or not (CFG_WLAN_SUPPORT)
 uint8_t wifi_exist_flag = 0;
 
@@ -705,14 +713,6 @@ void rf_power_off(void)
     rcu_periph_clock_disable(RCU_RF);
 #endif /* CONFIG_PLATFORM_ASIC */
 }
-
-#ifdef CONFIG_PLATFORM_FPGA
-#define RTC_CLOCK_SOURCE_HXTAL_DIV_RTCDIV
-#elif CONFIG_BOARD == PLATFORM_BOARD_32VW55X_START
-#define RTC_CLOCK_SOURCE_IRC32K
-#else
-#define RTC_CLOCK_SOURCE_LXTAL
-#endif
 
 __IO uint32_t prescaler_a = 0, prescaler_s = 0;
 

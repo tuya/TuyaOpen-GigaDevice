@@ -47,7 +47,8 @@ OPERATE_RET tkl_ble_stack_init(uint8_t role)
 OPERATE_RET tkl_ble_stack_deinit(uint8_t role)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    app_ble_disable();
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
@@ -106,6 +107,13 @@ OPERATE_RET tkl_ble_gatt_callback_register(const TKL_BLE_GATT_EVT_FUNC_CB gatt_e
 OPERATE_RET tkl_ble_gap_addr_set(TKL_BLE_GAP_ADDR_T const *p_peer_addr)
 {
     // --- BEGIN: user implements ---
+    if (p_peer_addr == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+    if (p_peer_addr->type == TKL_BLE_GAP_ADDR_TYPE_PUBLIC) {
+        ble_status_t ret = ble_adp_public_addr_set((uint8_t *)p_peer_addr->addr);
+        return (ret == BLE_ERR_NO_ERROR) ? OPRT_OK : OPRT_COM_ERROR;
+    }
     return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }
@@ -359,7 +367,7 @@ OPERATE_RET tkl_ble_gatts_value_set(uint16_t conn_handle, uint16_t char_handle, 
 OPERATE_RET tkl_ble_gatts_value_get(uint16_t conn_handle, uint16_t char_handle, uint8_t *p_data, uint16_t length)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    return tuya_hal_gatts_value_get(conn_handle, char_handle, p_data, length);
     // --- END: user implements ---
 }
 

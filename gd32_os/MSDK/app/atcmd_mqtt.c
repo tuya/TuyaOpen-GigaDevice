@@ -42,6 +42,8 @@ OF SUCH DAMAGE.
 
 static bool mqtt_usercfg_setted = false;
 
+extern mqtt_client_context_t *g_mqtt_ctx;
+
 void at_mqtt_receive_pub_msg_print(void *inpub_arg, const char *data, uint16_t payload_length)
 {
     AT_RSP_START(payload_length + 64);
@@ -148,19 +150,27 @@ void at_mqtt_user_cfg(int argc, char **argv)
             AT_TRACE("invalid MQTT ca_id, ERR CODE:0x%08x\r\n", AT_MQTT_CA_ID_VALUE_IS_WRONG);
             goto Error;
         }
-        if (mqtt_client_id_set(client_id, strlen(client_id)) != 0) {
+
+        if (g_mqtt_ctx == NULL) {
+            g_mqtt_ctx = mqtt_client_context_init();
+            if (g_mqtt_ctx == NULL) {
+                AT_TRACE("MQTT: context init failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
+                goto Error;
+            }
+        }
+        if (mqtt_client_id_set(g_mqtt_ctx, client_id, strlen(client_id)) != 0) {
             AT_TRACE("MQTT: client id set failed\r\n");
             goto Error;
         }
-        if (mqtt_client_user_set(username, strlen(username)) != 0) {
+        if (mqtt_client_user_set(g_mqtt_ctx, username, strlen(username)) != 0) {
             AT_TRACE("MQTT: user name set failed\r\n");
             goto Error;
         }
-        if (mqtt_client_pass_set(password, strlen(password)) != 0) {
+        if (mqtt_client_pass_set(g_mqtt_ctx, password, strlen(password)) != 0) {
             AT_TRACE("MQTT: user password set failed\r\n");
             goto Error;
         }
-        mqtt_scheme_set(scheme);
+        g_mqtt_ctx->mqtt_scheme = scheme;
     } else {
         AT_TRACE("MQTT: wrong parameter counts, ERR CODE:0x%08x\r\n", AT_MQTT_PARAMETER_COUNTS_IS_WRONG);
         goto Error;
@@ -171,7 +181,9 @@ void at_mqtt_user_cfg(int argc, char **argv)
     return;
 
 Error:
-    client_user_info_free();
+    if (g_mqtt_ctx != NULL) {
+        client_user_info_free(g_mqtt_ctx);
+    }
     AT_RSP_ERR();
     return;
 Usage:
@@ -224,6 +236,12 @@ void at_mqtt_set_client_id(int argc, char **argv)
                 AT_TRACE("invalid MQTT length, ERR CODE:0x%08x\r\n", AT_MQTT_CLIENT_ID_IS_OVERLENGTH);
                 goto Error;
             }
+
+            if (g_mqtt_ctx == NULL) {
+                AT_TRACE("mqtt context is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+                goto Error;
+            }
+
             AT_RSP_DIRECT("OK\r\n", 4);
             AT_RSP_DIRECT(">\r\n", 3);
             client_id = sys_malloc(length);
@@ -234,7 +252,7 @@ void at_mqtt_set_client_id(int argc, char **argv)
 
             // Block here to wait dma receive done
             at_hw_dma_receive((uint32_t)client_id, length);
-            if (mqtt_client_id_set(client_id, length) == 0) {
+            if (mqtt_client_id_set(g_mqtt_ctx, client_id, length) == 0) {
                 AT_TRACE("MQTT: client id set successful\r\n");
             } else {
                 AT_TRACE("MQTT: client id set failed\r\n");
@@ -307,6 +325,12 @@ void at_mqtt_set_username(int argc, char **argv)
                 AT_TRACE("invalid MQTT length, ERR CODE:0x%08x\r\n", AT_MQTT_USERNAME_IS_OVERLENGTH);
                 goto Error;
             }
+
+            if (g_mqtt_ctx == NULL) {
+                AT_TRACE("mqtt context is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+                goto Error;
+            }
+
             AT_RSP_DIRECT("OK\r\n", 4);
             AT_RSP_DIRECT(">\r\n", 3);
             client_user = sys_malloc(length);
@@ -317,7 +341,7 @@ void at_mqtt_set_username(int argc, char **argv)
 
             // Block here to wait dma receive done
             at_hw_dma_receive((uint32_t)client_user, length);
-            if (mqtt_client_user_set(client_user, length) == 0) {
+            if (mqtt_client_user_set(g_mqtt_ctx, client_user, length) == 0) {
                 AT_TRACE("MQTT: user name set successful\r\n");
             } else {
                 AT_TRACE("MQTT: user name set failed\r\n");
@@ -390,6 +414,12 @@ void at_mqtt_set_password(int argc, char **argv)
                 AT_TRACE("invalid MQTT length, ERR CODE:0x%08x\r\n", AT_MQTT_PASSWORD_IS_OVERLENGTH);
                 goto Error;
             }
+
+            if (g_mqtt_ctx == NULL) {
+                AT_TRACE("mqtt context is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+                goto Error;
+            }
+
             AT_RSP_DIRECT("OK\r\n", 4);
             AT_RSP_DIRECT(">\r\n", 3);
             client_pass = sys_malloc(length);
@@ -400,7 +430,7 @@ void at_mqtt_set_password(int argc, char **argv)
 
             // Block here to wait dma receive done
             at_hw_dma_receive((uint32_t)client_pass, length);
-            if (mqtt_client_pass_set(client_pass, length) == 0) {
+            if (mqtt_client_pass_set(g_mqtt_ctx, client_pass, length) == 0) {
                 AT_TRACE("MQTT: user password set successful\r\n");
             } else {
                 AT_TRACE("MQTT: user password set failed\r\n");
@@ -517,7 +547,15 @@ void at_mqtt_conn_cfg(int argc, char **argv)
             AT_TRACE("invalid MQTT will_retain, ERR CODE:0x%08x\r\n", AT_MQTT_LWT_RETAIN_VALUE_IS_WRONG);
             goto Error;
         }
-        if (mqtt_client_conn_set(keep_alive, clean_session_disabled, will_topic, will_msg, will_qos, will_retain) == 0) {
+
+        if (g_mqtt_ctx == NULL) {
+            g_mqtt_ctx = mqtt_client_context_init();
+            if (g_mqtt_ctx == NULL) {
+                AT_TRACE("MQTT: context init failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
+                goto Error;
+            }
+        }
+        if (mqtt_client_conn_set(g_mqtt_ctx, keep_alive, clean_session_disabled, will_topic, will_msg, will_qos, will_retain) == 0) {
             AT_TRACE("MQTT: connection properties set successful\r\n");
         } else {
             AT_TRACE("MQTT: connection properties set failed\r\n");
@@ -540,7 +578,6 @@ Usage:
     return;
 }
 
-extern cmd_msg_sub_t at_topic_sub_list;
 /*!
     \brief      the AT command MQTT connect
     \param[in]  argc: number of parameters
@@ -550,34 +587,36 @@ extern cmd_msg_sub_t at_topic_sub_list;
 */
 void at_mqtt_conn(int argc, char **argv)
 {
-    uint16_t link_id = 0, scheme;
+    uint16_t link_id = 0;
     uint32_t port;
     uint8_t state, reconnect;
     char *endptr = NULL, *host = NULL;
 
     AT_RSP_START(512);
-    scheme = mqtt_scheme_get();
     if (argc == 1) {
         if (argv[0][strlen(argv[0]) - 1] == AT_QUESTION) {
-            mqtt_client_t *at_mqtt_client = mqtt_client_get();
-            if (mqtt_usercfg_setted == false) {
+            mqtt_client_t *at_mqtt_client = NULL;
+            if (g_mqtt_ctx != NULL) {
+                at_mqtt_client = g_mqtt_ctx->mqtt_client;
+            }
+            if (g_mqtt_ctx == NULL) {
                 state = 0;
                 AT_RSP("+MQTTCONN:0,%d\r\n", state);
-            } else if ((mqtt_usercfg_setted == true) && (at_mqtt_client == NULL)) {
+            } else if ((mqtt_usercfg_setted == true) && (at_mqtt_client == NULL) && (g_mqtt_ctx->client_user_info->will_topic == NULL)) {
                 state = 1;
-                AT_RSP("+MQTTCONN:0,%d,%d\r\n", state, scheme);
+                AT_RSP("+MQTTCONN:0,%d,%d\r\n", state, g_mqtt_ctx->mqtt_scheme);
+            } else if ((at_mqtt_client == NULL) && (g_mqtt_ctx->client_user_info->will_topic != NULL)) {
+                state = 2;
+                AT_RSP("+MQTTCONN:0,%d\r\n", state);
             } else if ((mqtt_usercfg_setted == true) && (at_mqtt_client != NULL)) {
-                host = mqtt_host_get();
-                port = mqtt_port_get();
-                reconnect = mqtt_reconnect_get();
-                if (mqtt_client_is_connected(at_mqtt_client) && !co_list_is_empty(&(at_topic_sub_list.cmd_msg_sub_list))) {
+                if (mqtt_client_is_connected(at_mqtt_client) && !co_list_is_empty(&(g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list))) {
                     state = 6;
-                } else if (mqtt_client_is_connected(at_mqtt_client) && co_list_is_empty(&(at_topic_sub_list.cmd_msg_sub_list))) {
+                } else if (mqtt_client_is_connected(at_mqtt_client) && co_list_is_empty(&(g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list))) {
                     state = 5;
                 } else {
                     state = 3;
                 }
-                AT_RSP("+MQTTCONN:0,%d,%d,\"%s\",%d,%d\r\n", state, scheme, host, port, reconnect);
+                AT_RSP("+MQTTCONN:0,%d,%d,\"%s\",%d,%d\r\n", state, g_mqtt_ctx->mqtt_scheme, g_mqtt_ctx->mqtt_host, g_mqtt_ctx->port, g_mqtt_ctx->auto_reconnect);
             }
         } else {
             AT_TRACE("MQTT: wrong parameter counts, ERR CODE:0x%08x\r\n", AT_MQTT_PARAMETER_COUNTS_IS_WRONG);
@@ -627,14 +666,39 @@ void at_mqtt_conn(int argc, char **argv)
             AT_TRACE("invalid MQTT reconnect, ERR CODE:0x%08x\r\n", AT_MQTT_RECONNECT_VALUE_IS_WRONG);
             goto Error;
         }
-        bool at_ota_enabled = false;
-        if (at_mqtt_connect_server(host, port, reconnect, at_ota_enabled) == 0) {
+
+        if (g_mqtt_ctx == NULL) {
+            AT_TRACE("mqtt context is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+            goto Error;
+        }
+        if (mqtt_host_set(g_mqtt_ctx, host, strlen(host)) == 0) {
+            AT_TRACE("MQTT: host set successful\r\n");
+        } else {
+            AT_TRACE("MQTT: host set failed\r\n");
+            goto Error;
+        }
+        g_mqtt_ctx->port = port;
+        g_mqtt_ctx->auto_reconnect = reconnect;
+        extern const char mqtt_mosquitto_ca[];
+        extern const char mqtt_mosquitto_client_crt[];
+        extern const char mqtt_mosquitto_client_private_key[];
+        extern const size_t mqtt_mosquitto_ca_len;
+        extern const size_t mqtt_mosquitto_client_crt_len;
+        extern const size_t mqtt_mosquitto_client_private_key_len;
+        g_mqtt_ctx->ca_cert = mqtt_mosquitto_ca;
+        g_mqtt_ctx->ca_cert_len = mqtt_mosquitto_ca_len;
+        g_mqtt_ctx->client_cert = mqtt_mosquitto_client_crt;
+        g_mqtt_ctx->client_cert_len = mqtt_mosquitto_client_crt_len;
+        g_mqtt_ctx->client_key = mqtt_mosquitto_client_private_key;
+        g_mqtt_ctx->client_key_len = mqtt_mosquitto_client_private_key_len;
+
+        if (at_mqtt_connect_server(g_mqtt_ctx) == 0) {
             uint32_t connect_time = sys_current_time_get();
             while (sys_current_time_get() - connect_time <= MQTT_LINK_TIME_LIMIT * 2) {
-                mqtt_client_t *at_mqtt_client = mqtt_client_get();
+                mqtt_client_t *at_mqtt_client = g_mqtt_ctx->mqtt_client;
                 if (at_mqtt_client != NULL &&  mqtt_client_is_connected(at_mqtt_client)) {
-                    mqtt_set_inpub_callback(at_mqtt_client, at_mqtt_receive_pub_msg_print, at_mqtt_receive_msg_print, client_user_info_get());
-                    AT_RSP("+MQTTCONNECTED:0,%d,\"%s\",%d,%d\r\n", scheme, host, port, reconnect);
+                    mqtt_set_inpub_callback(at_mqtt_client, at_mqtt_receive_pub_msg_print, at_mqtt_receive_msg_print, g_mqtt_ctx->client_user_info);
+                    AT_RSP("+MQTTCONNECTED:0,%d,\"%s\",%d,%d\r\n", g_mqtt_ctx->mqtt_scheme, g_mqtt_ctx->mqtt_host, g_mqtt_ctx->port, g_mqtt_ctx->auto_reconnect);
                     break;
                 } else if (at_mqtt_client == NULL) {
                     AT_TRACE("MQTT: connect failed\r\n");
@@ -776,7 +840,11 @@ void at_mqtt_pub(int argc, char **argv)
             AT_TRACE("invalid MQTT retain, ERR CODE:0x%08x\r\n", AT_MQTT_RETAIN_VALUE_IS_WRONG);
             goto Error;
         }
-        int res = at_mqtt_msg_pub(topic, data, strlen(data), qos, retain);
+        if (g_mqtt_ctx == NULL) {
+            AT_TRACE("mqtt context is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+            goto Error;
+        }
+        int res = at_mqtt_msg_pub(g_mqtt_ctx, topic, data, strlen(data), qos, retain);
         if (res != 0) {
             AT_TRACE("MQTT: publish failed, ERR CODE:0x%08x\r\n", AT_MQTT_CLIENT_PUBLISH_FAILED);
             goto Error;
@@ -865,6 +933,11 @@ void at_mqtt_pub_raw(int argc, char **argv)
             goto Error;
         }
 
+        if (g_mqtt_ctx == NULL) {
+            AT_TRACE("mqtt context is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+            goto Error;
+        }
+
         data = sys_malloc(length + 1);
         if (NULL == data) {
             AT_TRACE("Allocate data buffer failed, ERR CODE:0x%08x\r\n", AT_MQTT_MALLOC_FAILED);
@@ -877,7 +950,7 @@ void at_mqtt_pub_raw(int argc, char **argv)
         at_hw_dma_receive((uint32_t)data, length);
         data[length] = '\0';
 
-        if (at_mqtt_msg_pub(topic, data, length, qos, retain) == 0) {
+        if (at_mqtt_msg_pub(g_mqtt_ctx, topic, data, length, qos, retain) == 0) {
             sys_mfree(data);
             AT_TRACE("MQTT: waiting for publish result callback\r\n");
             AT_RSP("+MQTTPUB:");
@@ -933,7 +1006,7 @@ void at_mqtt_sub_result_cb(void *arg, err_t status)
             memcpy(sub_topic->topic, sub_msg->topic, strlen(sub_msg->topic) + 1);
             sub_topic->qos = (uint8_t)sub_msg->qos;
             sys_sched_lock();
-            co_list_push_back(&(at_topic_sub_list.cmd_msg_sub_list), &(sub_topic->hdr));
+            co_list_push_back(&(g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list), &(sub_topic->hdr));
             sys_sched_unlock();
             sys_mfree(sub_msg->topic);
             sys_mfree(sub_msg);
@@ -965,13 +1038,13 @@ void at_mqtt_unsub_result_cb(void *arg, err_t status)
     if (status == ERR_OK) {
         AT_TRACE("massage unsubscribe success\r\n");
         if (sub_msg) {
-            struct co_list_hdr *curr = at_topic_sub_list.cmd_msg_sub_list.first;
+            struct co_list_hdr *curr = g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list.first;
             while (curr) {
                 sub_topic = CONTAINER_OF(curr, sub_msg_t, hdr);
                 struct co_list_hdr *next = curr->next;
                 if (sub_topic && strcmp(sub_topic->topic, sub_msg->topic) == 0) {
                     sys_sched_lock();
-                    co_list_extract(&(at_topic_sub_list.cmd_msg_sub_list), curr);
+                    co_list_extract(&(g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list), curr);
                     sys_sched_unlock();
                     curr = NULL;
                     sys_mfree(sub_topic->topic);
@@ -1040,21 +1113,39 @@ void at_mqtt_sub(int argc, char **argv)
     AT_RSP_START(512);
     if (argc == 1) {
         if (argv[0][strlen(argv[0]) - 1] == AT_QUESTION) {
-            mqtt_client_t *at_mqtt_client = mqtt_client_get();
-            if (at_mqtt_client != NULL && !co_list_is_empty(&(at_topic_sub_list.cmd_msg_sub_list))) {
-                if (mqtt_client_is_connected(at_mqtt_client)) {
+            mqtt_client_t *at_mqtt_client = NULL;
+            if (g_mqtt_ctx != NULL) {
+                at_mqtt_client = g_mqtt_ctx->mqtt_client;
+            }
+            if (g_mqtt_ctx == NULL) {
+                state = 0;
+                AT_RSP("+MQTTSUB:0,%d\r\n", state);
+            } else if ((mqtt_usercfg_setted == true) && (at_mqtt_client == NULL) && (g_mqtt_ctx->client_user_info->will_topic == NULL)) {
+                state = 1;
+                AT_RSP("+MQTTSUB:0,%d\r\n", state);
+            } else if ((at_mqtt_client == NULL) && (g_mqtt_ctx->client_user_info->will_topic != NULL)) {
+                state = 2;
+                AT_RSP("+MQTTSUB:0,%d\r\n", state);
+            } else if (at_mqtt_client != NULL) {
+                if (mqtt_client_is_connected(at_mqtt_client) && !co_list_is_empty(&(g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list))) {
                     state = 6;
+                } else if (mqtt_client_is_connected(at_mqtt_client) && co_list_is_empty(&(g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list))) {
+                    state = 5;
                 } else {
                     state = 3;
                 }
-                sys_sched_lock();
-                struct co_list_hdr *curr = at_topic_sub_list.cmd_msg_sub_list.first;
-                while (curr) {
-                    sub_msg_t *sub_topic = CONTAINER_OF(curr, sub_msg_t, hdr);
-                    AT_RSP("+MQTTSUB:%d,%d,\"%s\",%d\r\n", link_id, state, sub_topic->topic, sub_topic->qos);
-                    curr = curr->next;
+                if (co_list_is_empty(&(g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list))) {
+                    AT_RSP("+MQTTSUB:0,%d\r\n", state);
+                } else {
+                    sys_sched_lock();
+                    struct co_list_hdr *curr = g_mqtt_ctx->at_topic_sub_list.cmd_msg_sub_list.first;
+                    while (curr) {
+                        sub_msg_t *sub_topic = CONTAINER_OF(curr, sub_msg_t, hdr);
+                        AT_RSP("+MQTTSUB:%d,%d,\"%s\",%d\r\n", link_id, state, sub_topic->topic, sub_topic->qos);
+                        curr = curr->next;
+                    }
+                    sys_sched_unlock();
                 }
-                sys_sched_unlock();
             }
             AT_RSP("OK\r\n");
             AT_RSP_IMMEDIATE();
@@ -1097,7 +1188,11 @@ void at_mqtt_sub(int argc, char **argv)
             AT_TRACE("invalid MQTT qos, ERR CODE:0x%08x\r\n", AT_MQTT_QOS_VALUE_IS_WRONG);
             goto Error;
         }
-        int res = at_mqtt_msg_sub(topic, qos, true);
+        if (g_mqtt_ctx == NULL) {
+            AT_TRACE("mqtt context is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+            goto Error;
+        }
+        int res = at_mqtt_msg_sub(g_mqtt_ctx, topic, qos, true);
         if (res == -2) {
             AT_RSP("ALREADY SUBSCRIBE\r\n");
             AT_RSP("OK\r\n");
@@ -1165,7 +1260,11 @@ void at_mqtt_unsub(int argc, char **argv)
             AT_TRACE("invalid MQTT topic, ERR CODE:0x%08x\r\n", AT_MQTT_TOPIC_IS_OVERLENGTH);
             goto Error;
         }
-        int res = at_mqtt_msg_sub(topic, 1, false);
+        if (g_mqtt_ctx == NULL) {
+            AT_TRACE("mqtt context is NULL, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+            goto Error;
+        }
+        int res = at_mqtt_msg_sub(g_mqtt_ctx, topic, 1, false);
         if (res == -2) {
             AT_RSP("NO UNSUBSCRIBE\r\n");
             AT_RSP("OK\r\n");
@@ -1229,12 +1328,15 @@ void at_mqtt_clean(int argc, char **argv)
                 AT_TRACE("invalid MQTT link_id, ERR CODE:0x%08x\r\n", AT_MQTT_LINK_ID_VALUE_IS_WRONG);
                 goto Error;
             }
-            mqtt_client_t *mqtt_client = mqtt_client_get();
-            if (mqtt_client == NULL || mqtt_client->run == false) {
+            if (g_mqtt_ctx == NULL) {
+                AT_TRACE("MQTT client is not initialized, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
+                goto Error;
+            }
+            if (g_mqtt_ctx->mqtt_client == NULL || g_mqtt_ctx->mqtt_client->run == false) {
                 AT_TRACE("MQTT client is not running, ERR CODE:0x%08x\r\n", AT_MQTT_UNINITIATED_OR_ALREADY_CLEAN);
                 goto Error;
             }
-            mqtt_client_disconnect(0, NULL);
+            mqtt_client_disconnect(g_mqtt_ctx, 0, NULL);
             mqtt_usercfg_setted = false;
         }
     } else {

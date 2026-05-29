@@ -41,6 +41,7 @@ OF SUCH DAMAGE.
 #include "co_list.h"
 #include "lwip/apps/mqtt.h"
 
+#define AUTO_RECONNECT_LIMIT    5
 #define MQTT_DEFAULT_PORT 1883
 
 #ifdef CONFIG_ATCMD
@@ -159,31 +160,52 @@ typedef struct cmd_msg_sub
     struct co_list cmd_msg_sub_list;
 } cmd_msg_sub_t;
 
-void mqtt_mode_type_set(enum mqtt_mode cmd_mode);
-enum mqtt_mode mqtt_mode_type_get(void);
-mqtt_client_t* mqtt_client_get(void);
-struct mqtt_connect_client_info_t *client_user_info_get(void);
-void mqtt_scheme_set(uint16_t scheme);
-uint16_t mqtt_scheme_get(void);
-uint16_t mqtt_port_get(void);
-uint8_t mqtt_reconnect_get(void);
-int mqtt_ws_path_set(char *path);
-void mqtt_ws_path_free(void);
-char *mqtt_ws_path_get(void);
-char *mqtt_host_get(void);
-void mqtt_host_free(void);
-bool at_topic_exist(const char *topic);
-void at_topic_sub_list_free(void);
+typedef struct mqtt_client_context {
+    mqtt_client_t *mqtt_client;
+    struct mqtt_connect_client_info_t *client_user_info;
+    char *mqtt_host;
+    ip_addr_t server_ip_addr;
+    uint16_t port;
+    uint16_t mqtt_scheme;
+    uint8_t tls_encry_mode;
+    enum mqtt_mode mqtt_cmd_mode;
+    const char *ca_cert;
+    size_t ca_cert_len;
+    const char *client_cert;
+    size_t client_cert_len;
+    const char *client_key;
+    size_t client_key_len;
+    const uint8_t *psk;
+    size_t psk_len;
+    const char *psk_identity;
+    size_t psk_identity_len;
+    bool auto_reconnect;
+    uint8_t auto_reconnect_num;
+    uint8_t auto_reconnect_limit;
+    uint32_t auto_reconnect_interval;
+    void *mqtt_task_handle;
+    bool mqtt_task_suspended;
+    cmd_msg_pub_t msg_pub_list;
+    cmd_msg_sub_t msg_sub_list;
+    cmd_msg_sub_t at_topic_sub_list;
+    bool waiting_for_conn_cb;
+} mqtt_client_context_t;
+
+
+void mqtt_mode_type_set(mqtt_client_context_t *mqtt_ctx, enum mqtt_mode cmd_mode);
+enum mqtt_mode  mqtt_mode_type_get(mqtt_client_context_t *mqtt_ctx);
+bool at_topic_exist(mqtt_client_context_t *mqtt_ctx, const char *topic);
+void at_topic_sub_list_free(mqtt_client_context_t *mqtt_ctx);
 void cmd_mqtt(int argc, char **argv);
-void mqtt_connect_server(int argc, char **argv);
-void mqtt_msg_pub(int argc, char **argv);
-void mqtt_msg_sub(int argc, char **argv);
-void mqtt_client_disconnect(int argc, char **argv);
-void mqtt_auto_reconnect_set(int argc, char **argv);
-void mqtt_task_resume(bool isr);
-int at_mqtt_connect_server(const char *host, uint16_t at_port, uint8_t reconnect, bool at_ota_enabled);
-int at_mqtt_msg_pub(const char *topic, const char *data, uint32_t data_len, uint8_t qos, uint8_t retain);
-int at_mqtt_msg_sub(const char *topic, uint8_t qos, bool sub_or_unsub);
+void mqtt_connect_server(mqtt_client_context_t *mqtt_ctx, int argc, char **argv);
+void mqtt_msg_pub(mqtt_client_context_t *mqtt_ctx, int argc, char **argv);
+void mqtt_msg_sub(mqtt_client_context_t *mqtt_ctx, int argc, char **argv);
+void mqtt_client_disconnect(mqtt_client_context_t *mqtt_ctx, int argc, char **argv);
+void mqtt_auto_reconnect_set(mqtt_client_context_t *mqtt_ctx, int argc, char **argv);
+void mqtt_task_resume(mqtt_client_context_t *mqtt_ctx, bool isr);
+int at_mqtt_connect_server(mqtt_client_context_t *mqtt_ctx);
+int at_mqtt_msg_pub(mqtt_client_context_t *mqtt_ctx, const char *topic, const char *data, uint32_t data_len, uint8_t qos, uint8_t retain);
+int at_mqtt_msg_sub(mqtt_client_context_t *mqtt_ctx, const char *topic, uint8_t qos, bool sub_or_unsub);
 
 #endif
 

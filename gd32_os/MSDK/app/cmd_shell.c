@@ -412,7 +412,7 @@ static void cmd_free(int argc, char **argv)
     used = total - free;
     max_used = total - max_used;
 
-    app_print("RTOS HEAP: free=%d used=%d max_used=%d/%d\n",
+    app_print("RTOS HEAP: free=%d used=%d max_used=%d/%d\r\n",
                 free, used, max_used, total);
 
     dump_mem_block_list();
@@ -1879,102 +1879,24 @@ static void cmd_qspi_flash_chip_erase(int argc, char **argv)
 }
 #endif
 
-#ifdef CONFIG_MP3_PLAY_ENABLE
-extern uint8_t play_mp3(uint16_t idx);
-void cmd_mp3(int argc, char **argv)
+static void cmd_image_switch(int argc, char **argv)
 {
-    uint16_t idx = 0;
-    uint8_t ret;
-    if (argc == 2) {
-        idx = atoi(argv[1]);
-        ret = play_mp3(idx);
-        if (ret != 0) {
-            app_print("play mp3 file failed %d\r\n");
-        }
+    uint8_t running_idx = 0;
+    uint32_t res = 0;
+
+    res = rom_sys_status_get(SYS_RUNNING_IMG, LEN_SYS_RUNNING_IMG, &running_idx);
+
+    res = rom_sys_set_img_flag(running_idx, (IMG_FLAG_IA_MASK | IMG_FLAG_NEWER_MASK), (IMG_FLAG_IA_OK | IMG_FLAG_OLDER));
+    res |= rom_sys_set_img_flag(!running_idx, (IMG_FLAG_IA_MASK | IMG_FLAG_VERIFY_MASK | IMG_FLAG_NEWER_MASK), 0);
+    res |= rom_sys_set_img_flag(!running_idx, IMG_FLAG_NEWER_MASK, IMG_FLAG_NEWER);
+
+    if (res != 0) {
+        app_print("Set sys image status failed(res = %d), switch image failed!\r\n", res);
         return;
     }
 
-    app_print("Usage: mp3 <index>\r\n");
-    app_print("\tindex: mp3 file index\r\n");
-}
-#endif
-
-extern void wifi_bridge_enter_test_mode(void);
-extern void wifi_bridge_exit_sleep_mode(void);
-
-// extern int cmd_to_spi(unsigned char *buf, unsigned int len, unsigned int crc32);
-
-/*
- * Internal protocol header prepended to every CMD payload sent over SPI.
- * Must match TY_LP_PROTO_CMD_HEAD_T in mm_cmd_parse.h (pragma pack(1)).
- */
-#pragma pack(1)
-typedef struct {
-    unsigned int  mark;         /* 0x12345678 */
-    unsigned char version;      /* LP_PROTO_VERSION = 0 */
-    unsigned char payLoadType;  /* 0 = JSON */
-    unsigned int  payLoadLen;   /* length of JSON string that follows */
-} _spi_cmd_head_t;
-#pragma pack()
-
-/*
- * spi_send
- *
- * Send a fixed raw CMD frame over SPI.  The 12-byte mm_data_header (BB marker
- * + len + crc) is added automatically by msg_to_spi(), so we only pass the
- * 52-byte payload portion here.
- */
-static void cmd_spi_send(int argc, char **argv)
-{
-    int ret = 0;
-    /* Payload = raw frame bytes AFTER the 12-byte mm_data_header.
-     * Original wire capture:
-     * [BB 00 00 00  34 00 00 00  BD 02 00 00]  <- header (added by msg_to_spi)
-     *  78 56 34 12  00 00 00 00  00 00 7B 22   <- payload starts here
-     *  00 01 02 ... 06 07                       <- 52 bytes total
-     */
-    static const unsigned char payload[] = {
-        0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x7B, 0x22,
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B,
-        0x0C, 0x0D, 0x0E, 0x0F, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-        0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x00, 0x01, 0x02, 0x03,
-        0x04, 0x05, 0x06, 0x07
-    };
-
-    /* CRC = byte accumulation over payload (matches 0x02BD) */
-    unsigned int crc32 = 0;
-    unsigned int k;
-    for (k = 0; k < sizeof(payload); k++) {
-        crc32 += payload[k];
-    }
-
-    // ret = cmd_to_spi((unsigned char *)payload, sizeof(payload), crc32);
-    if (ret == 0) {
-        app_print("spi_send: ok len=%u crc=0x%08X\r\n", (unsigned)sizeof(payload), crc32);
-    } else {
-        app_print("spi_send: failed\r\n");
-    }
-}
-
-void cmd_spi_test(int argc, char **argv)
-{
-    uint16_t idx = 0;
-
-    if (argc == 2) {
-        idx = atoi(argv[1]);
-        if (idx == 0) {
-            wifi_bridge_self_mode();
-        } else if (idx == 1) {
-            wifi_bridge_exit_sleep_mode();
-        } else if (idx == 2) {
-            wifi_bridge_enter_test_mode();
-        } else {
-            app_print("spi test parameter error.\r\n");
-        }
-
-        return;
-    }
-    app_print("Test on\r\n");
+    app_print("Switch image successful, please reboot now!\r\n");
+    return;
 }
 
 // Array of supported CLI command
@@ -1989,11 +1911,6 @@ static const struct cmd_entry cmd_table[] =
 
 #ifdef CONFIG_FATFS_SUPPORT
     {"fatfs", cmd_fatfs},
-#endif
-    {"spi_test", cmd_spi_test},
-    {"spi", cmd_spi_send},
-#ifdef CONFIG_MP3_PLAY_ENABLE
-    {"mp3", cmd_mp3},
 #endif
     {"rmem", cmd_read_memory},
 #ifdef CONFIG_BASECMD
@@ -2080,6 +1997,7 @@ static const struct cmd_entry cmd_table[] =
 #if NVDS_FLASH_SUPPORT
     {"nvds", cmd_nvds_handle},
 #endif /* NVDS_FLASH_SUPPORT */
+    {"image_switch", cmd_image_switch},
 #endif /* CONFIG_BASECMD */
 
     {"", NULL}

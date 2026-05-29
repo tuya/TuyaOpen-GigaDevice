@@ -103,4 +103,6 @@ OPERATE_RET tuya_hal_gattc_write(uint16_t conn_handle, uint16_t char_handle, uin
 OPERATE_RET tuya_hal_gattc_read(uint16_t conn_handle, uint16_t char_handle);
 
 void tuya_wait_ble_ready(void);
+void tuya_adp_init(uint8_t role);
+
 #endif // _TUYA_BLE_HAL_H_

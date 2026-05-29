@@ -762,10 +762,6 @@ static void at_help(int argc, char **argv)
 #include "atcmd_ota_demo.c"
 #endif
 
-#ifdef TUYAOS_SUPPORT
-#include "atcmd_tuya.c"
-#endif
-
 static const struct atcmd_entry atcmd_table[] = {
     /* ====== Base ====== */
     {"AT", at_entry},
@@ -883,14 +879,6 @@ static const struct atcmd_entry atcmd_table[] = {
 #endif //CONFIG_ATCMD_SPI
 #endif //CONFIG_AZURE_F527_DEMO_SUPPORT
 #endif //CFG_WLAN_SUPPORT
-
-#ifdef TUYAOS_SUPPORT
-    /* ====== Tuya Cloud ====== */
-    /* F527 -> VW553 commands */
-    {"AT+TYTELS", at_tytels},
-    {"AT+TYPROPS", at_typrops},
-    {"AT+TYERRCODE", at_tuya_error_code},
-#endif //TUYAOS_SUPPORT
 
 #ifdef CFG_BLE_SUPPORT
     {"AT+BLEENABLE", at_ble_enable},

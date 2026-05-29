@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<?fileVersion 4.0.0?><cproject storage_type_id="org.eclipse.cdt.core.XmlProjectDescriptionStorage">
+	<storageModule moduleId="org.eclipse.cdt.core.settings">
+		<cconfiguration id="com.gigadevice.mbs.riscv.configuration.debug.465677685">
+			<storageModule buildSystemId="org.eclipse.cdt.managedbuilder.core.configurationDataProvider" id="com.gigadevice.mbs.riscv.configuration.debug.465677685" moduleId="org.eclipse.cdt.core.settings" name="azure_lib_out">
+				<externalSettings>
+					<externalSetting>
+						<entry flags="VALUE_WORKSPACE_PATH" kind="includePath" name="/azure_lib"/>
+						<entry flags="VALUE_WORKSPACE_PATH" kind="libraryPath" name="/azure_lib/azure_lib_out"/>
+						<entry flags="RESOLVED" kind="libraryFile" name="libazureiot" srcPrefixMapping="" srcRootPath=""/>
+					</externalSetting>
+				</externalSettings>
+				<extensions>
+					<extension id="org.eclipse.cdt.core.ELF" point="org.eclipse.cdt.core.BinaryParser"/>
+					<extension id="org.eclipse.cdt.core.GmakeErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.CWDLocator" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GLDErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GASErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+					<extension id="org.eclipse.cdt.core.GCCErrorParser" point="org.eclipse.cdt.core.ErrorParser"/>
+				</extensions>
+			</storageModule>
+			<storageModule moduleId="cdtBuildSystem" version="4.0.0">
+				<configuration artifactExtension="a" artifactName="libazureiot" buildArtefactType="org.eclipse.cdt.build.core.buildArtefactType.staticLib" buildProperties="org.eclipse.cdt.build.core.buildArtefactType=org.eclipse.cdt.build.core.buildArtefactType.staticLib,org.eclipse.cdt.build.core.buildType=org.eclipse.cdt.build.core.buildType.debug" cleanCommand="rm -rf" description="" errorParsers="org.eclipse.cdt.core.GASErrorParser;org.eclipse.cdt.core.GmakeErrorParser;org.eclipse.cdt.core.GLDErrorParser;org.eclipse.cdt.core.CWDLocator;org.eclipse.cdt.core.GCCErrorParser" id="com.gigadevice.mbs.riscv.configuration.debug.465677685" name="azure_lib_out" parent="com.gigadevice.mbs.riscv.configuration.debug" postbuildStep="mkdir ../lib; cp &quot;libazureiot.a&quot; &quot;../lib&quot;" prebuildStep="">
+					<folderInfo id="com.gigadevice.mbs.riscv.configuration.debug.465677685." name="/" resourcePath="">
+						<toolChain id="com.gigadevice.mbs.riscv.toolChain.elf.debug.1402523099" name="GD RISC-V MCU Toolchain" secondaryOutputs="com.gigadevice.mbs.riscv.outputType.objcopy.hex;com.gigadevice.mbs.riscv.outputType.objcopy.bin;com.gigadevice.mbs.riscv.outputType.objdump.list;com.gigadevice.mbs.riscv.outputType.size" superClass="com.gigadevice.mbs.riscv.toolChain.elf.debug">
+							<option id="com.gigadevice.mbs.riscv.option.targetProcessor.isa.1018504199" name="Architecture" superClass="com.gigadevice.mbs.riscv.option.targetProcessor.isa" useByScannerDiscovery="true" value="rv32imafcbp" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.targetProcessor.abi.integer.1808782490" name="Integer ABI" superClass="com.gigadevice.mbs.riscv.option.targetProcessor.abi.integer" useByScannerDiscovery="true" value="com.gigadevice.mbs.riscv.option.targetProcessor.abi.integer.default" valueType="enumerated"/>
+							<option id="com.gigadevice.mbs.riscv.option.targetProcessor.codeModel.1295917548" name="Code model" superClass="com.gigadevice.mbs.riscv.option.targetProcessor.codeModel" useByScannerDiscovery="true" value="com.gigadevice.mbs.riscv.option.targetProcessor.codeModel.low" valueType="enumerated"/>
+							<option id="com.gigadevice.mbs.riscv.option.targetProcessor.smallDataLimit.2124514140" name="Small data limit" superClass="com.gigadevice.mbs.riscv.option.targetProcessor.smallDataLimit" useByScannerDiscovery="true" value="8" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.targetProcessor.div.1941119458" name="Hardware integer divide instructions (-mdiv)" superClass="com.gigadevice.mbs.riscv.option.targetProcessor.div" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.targetProcessor.allOptions.1773885847" name="All options" superClass="com.gigadevice.mbs.riscv.option.targetProcessor.allOptions" useByScannerDiscovery="false" value=" -march=rv32imafcbp -mcmodel=medlow -msmall-data-limit=8 -msave-restore -mabi=ilp32f" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.targetProcessor.saveRestore.483559613" name="Smaller but slower prologue and epilogue code (-msave-restore)" superClass="com.gigadevice.mbs.riscv.option.targetProcessor.saveRestore" useByScannerDiscovery="true" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.noCommon.462519625" name="No common unitialized (-fno-common)" superClass="com.gigadevice.mbs.riscv.option.optimization.noCommon" useByScannerDiscovery="true" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.PIC.916490962" name="Position independent code (-fPIC)" superClass="com.gigadevice.mbs.riscv.option.optimization.PIC" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.lto.1144109838" name="Standard link-time optimizer (-flto)" superClass="com.gigadevice.mbs.riscv.option.optimization.lto" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.messageLength.720645766" name="Message length (-fmessage-length=0)" superClass="com.gigadevice.mbs.riscv.option.optimization.messageLength" useByScannerDiscovery="true" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.allOptions.1321422849" name="All options" superClass="com.gigadevice.mbs.riscv.option.optimization.allOptions" useByScannerDiscovery="false" value="-Os -fmessage-length=0 -fsigned-char -ffunction-sections -fdata-sections -fno-common" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.signedChar.1855889569" name="Plain char is signed (-fsigned-char)" superClass="com.gigadevice.mbs.riscv.option.optimization.signedChar" useByScannerDiscovery="true" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.functionSections.637393662" name="Function sections (-ffunction-sections)" superClass="com.gigadevice.mbs.riscv.option.optimization.functionSections" useByScannerDiscovery="true" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.dataSections.1604576514" name="Data sections (-fdata-sections)" superClass="com.gigadevice.mbs.riscv.option.optimization.dataSections" useByScannerDiscovery="true" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.optimization.level.510615645" name="Optimization Level" superClass="com.gigadevice.mbs.riscv.option.optimization.level" useByScannerDiscovery="true" value="com.gigadevice.mbs.option.toolSettings.optimization.level.size" valueType="enumerated"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.syntaxOnly.980658571" name="Check syntax only (-fsyntax-only)" superClass="com.gigadevice.mbs.riscv.option.warnings.syntaxOnly" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.allOptions.796310916" name="All options" superClass="com.gigadevice.mbs.riscv.option.warnings.allOptions" useByScannerDiscovery="false" value="" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.pedantic.1391874664" name="Strict ISO C (-pedantic)" superClass="com.gigadevice.mbs.riscv.option.warnings.pedantic" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.pedanticErrors.158353941" name="Pedantic warnings as errors (-pedantic-errors)" superClass="com.gigadevice.mbs.riscv.option.warnings.pedanticErrors" useByScannerDiscovery="false" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.allWarn.589025986" name="Enable all common warnings (-Wall)" superClass="com.gigadevice.mbs.riscv.option.warnings.allWarn" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.extraWarn.1640446474" name="Enable some extra warnings (-Wextra)" superClass="com.gigadevice.mbs.riscv.option.warnings.extraWarn" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.conversion.608444919" name="Warn for implicit conversions (-Wconversion)" superClass="com.gigadevice.mbs.riscv.option.warnings.conversion" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.uninitialized.722410178" name="Warn on uninitialized variables (-Wuninitialised)" superClass="com.gigadevice.mbs.riscv.option.warnings.uninitialized" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.unused.1731992041" name="Warn on various unused elements (-Wunused)" superClass="com.gigadevice.mbs.riscv.option.warnings.unused" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.toErrors.2017165863" name="Generate errors instead of warnings (-Werror)" superClass="com.gigadevice.mbs.riscv.option.warnings.toErrors" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.warnings.noWarn.660056180" name="Inhibit all warnings (-w)" superClass="com.gigadevice.mbs.riscv.option.warnings.noWarn" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.debugging.level.258299652" name="Debug level" superClass="com.gigadevice.mbs.riscv.option.debugging.level" useByScannerDiscovery="true" value="com.gigadevice.mbs.option.toolSettings.debugging.level.default" valueType="enumerated"/>
+							<option id="com.gigadevice.mbs.riscv.option.debugging.allOptions.56805431" name="All options" superClass="com.gigadevice.mbs.riscv.option.debugging.allOptions" useByScannerDiscovery="false" value=" -g" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.debugging.prof.1804951196" name="Generate prof information (-p)" superClass="com.gigadevice.mbs.riscv.option.debugging.prof" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.debugging.gProf.1995725426" name="Generate gprof information (-pg)" superClass="com.gigadevice.mbs.riscv.option.debugging.gProf" useByScannerDiscovery="true" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.outputFile.list.839645508" name="List" superClass="com.gigadevice.mbs.riscv.option.outputFile.list" useByScannerDiscovery="false" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.outputFile.dump.1184994283" name="Dump" superClass="com.gigadevice.mbs.riscv.option.outputFile.dump" useByScannerDiscovery="false" value="false" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.outputFile.hex.1872083760" name="Hex" superClass="com.gigadevice.mbs.riscv.option.outputFile.hex" useByScannerDiscovery="false" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.outputFile.bin.2033349006" name="Bin" superClass="com.gigadevice.mbs.riscv.option.outputFile.bin" useByScannerDiscovery="false" value="true" valueType="boolean"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.path.1683367855" name="%option.base.toolChain.path" superClass="com.gigadevice.mbs.riscv.option.toolChain.path" useByScannerDiscovery="false" value=".\Tools\nuclei_riscv_newlibc_prebuilt_win32_2022.04\gcc\bin" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.buildToolPath.320751860" name="%option.base.toolChain.buildToolPath" superClass="com.gigadevice.mbs.riscv.option.toolChain.buildToolPath" useByScannerDiscovery="false" value=".\Tools\Build Tools\2.10-20180103-1919\bin" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.targetMcu.partNo.338703686" superClass="com.gigadevice.mbs.riscv.option.targetMcu.partNo" useByScannerDiscovery="false" value="GD32VW553HMQ7" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.prefix.642211528" name="%option.base.toolChain.prefix" superClass="com.gigadevice.mbs.riscv.option.toolChain.prefix" useByScannerDiscovery="false" value="riscv-nuclei-elf-" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.c.1144299845" name="C Compiler" superClass="com.gigadevice.mbs.riscv.option.toolChain.c" useByScannerDiscovery="false" value="riscv-nuclei-elf-gcc" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.objcopy.232396827" name="%option.base.toolChain.objcopy" superClass="com.gigadevice.mbs.riscv.option.toolChain.objcopy" useByScannerDiscovery="false" value="riscv-nuclei-elf-objcopy" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.objdump.232396827" name="%option.base.toolChain.listing" superClass="com.gigadevice.mbs.riscv.option.toolChain.objdump" useByScannerDiscovery="false" value="riscv-nuclei-elf-objdump" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.size.1928585804" name="%option.base.toolChain.size" superClass="com.gigadevice.mbs.riscv.option.toolChain.size" useByScannerDiscovery="false" value="riscv-nuclei-elf-size" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.targetProcessor.other.84560549" name="Other target flags" superClass="com.gigadevice.mbs.riscv.option.targetProcessor.other" useByScannerDiscovery="true" value="-mabi=ilp32f" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.cpp.395244257" name="C++ Compiler" superClass="com.gigadevice.mbs.riscv.option.toolChain.cpp" value="riscv-nuclei-elf-g++" valueType="string"/>
+							<option id="com.gigadevice.mbs.riscv.option.toolChain.ar.219298868" name="Archiver" superClass="com.gigadevice.mbs.riscv.option.toolChain.ar" value="riscv-nuclei-elf-ar" valueType="string"/>
+							<targetPlatform archList="all" binaryParser="org.eclipse.cdt.core.ELF" id="com.gigadevice.mbs.riscv.targetPlatform.986394456" isAbstract="false" osList="all" superClass="com.gigadevice.mbs.riscv.targetPlatform"/>
+							<builder buildPath="${workspace_loc:/ble}/GD RISC-V MCU Release" id="com.gigadevice.mbs.riscv.builder.138904099" keepEnvironmentInBuildfile="false" managedBuildOn="true" name="Gnu Make Builder" parallelBuildOn="true" parallelizationNumber="optimal" superClass="com.gigadevice.mbs.riscv.builder"/>
+							<tool id="com.gigadevice.mbs.riscv.tool.linker.1124385153" name="GD RISC-V MCU Linker" superClass="com.gigadevice.mbs.riscv.tool.linker">
+								<option id="com.gigadevice.mbs.riscv.option.linker.general.gcsections.722980278" name="Remove unused sections (-Xlinker --gc-sections)" superClass="com.gigadevice.mbs.riscv.option.linker.general.gcsections" useByScannerDiscovery="false" value="true" valueType="boolean"/>
+								<option id="com.gigadevice.mbs.riscv.option.linker.general.scriptFile.738883171" name="Linker script (-T)" superClass="com.gigadevice.mbs.riscv.option.linker.general.scriptFile" useByScannerDiscovery="false"/>
+								<option id="com.gigadevice.mbs.riscv.option.linker.general.nostart.1195957327" name="Don't use standard system startup files (-nostartfiles)" superClass="com.gigadevice.mbs.riscv.option.linker.general.nostart" useByScannerDiscovery="false" value="true" valueType="boolean"/>
+								<option id="com.gigadevice.mbs.riscv.option.linker.misc.usenewlibnano.1403098172" name="Use newlib-nano (--specs=nano.specs)" superClass="com.gigadevice.mbs.riscv.option.linker.misc.usenewlibnano" useByScannerDiscovery="false" value="true" valueType="boolean"/>
+								<option id="com.gigadevice.mbs.riscv.option.linker.libraries.libs.1700829534" name="Libraries (-l)" superClass="com.gigadevice.mbs.riscv.option.linker.libraries.libs" useByScannerDiscovery="false"/>
+								<option id="com.gigadevice.mbs.riscv.option.linker.libraries.paths.2070982829" name="Library search path (-L)" superClass="com.gigadevice.mbs.riscv.option.linker.libraries.paths" useByScannerDiscovery="false"/>
+								<option id="com.gigadevice.mbs.riscv.option.linker.misc.other.1566950370" name="Other linker flags" superClass="com.gigadevice.mbs.riscv.option.linker.misc.other" useByScannerDiscovery="false" value="" valueType="string"/>
+								<inputType id="com.gigadevice.mbs.riscv.inputType.linker.1245030760" superClass="com.gigadevice.mbs.riscv.inputType.linker">
+									<additionalInput kind="additionalinputdependency" paths="$(USER_OBJS)"/>
+									<additionalInput kind="additionalinput" paths="$(LIBS)"/>
+								</inputType>
+							</tool>
+							<tool id="com.gigadevice.mbs.riscv.tool.assembler.1052852976" name="GD RISC-V MCU Assembler" superClass="com.gigadevice.mbs.riscv.tool.assembler">
+								<option id="com.gigadevice.mbs.riscv.option.assembler.preprocessor.usepreprocessor.406164730" name="Use preprocessor" superClass="com.gigadevice.mbs.riscv.option.assembler.preprocessor.usepreprocessor" useByScannerDiscovery="false" value="true" valueType="boolean"/>
+								<option id="com.gigadevice.mbs.riscv.option.assembler.includes.paths.1392416647" name="Include paths (-I)" superClass="com.gigadevice.mbs.riscv.option.assembler.includes.paths" useByScannerDiscovery="true"/>
+								<option id="com.gigadevice.mbs.riscv.option.assembler.symbols.defs.1948910806" name="Define (-D)" superClass="com.gigadevice.mbs.riscv.option.assembler.symbols.defs" useByScannerDiscovery="true"/>
+								<inputType id="com.gigadevice.mbs.riscv.inputType.assembler.1530766368" superClass="com.gigadevice.mbs.riscv.inputType.assembler"/>
+							</tool>
+							<tool id="com.gigadevice.mbs.riscv.tool.CCompiler.129693547" name="GD RISC-V MCU C Compiler" superClass="com.gigadevice.mbs.riscv.tool.CCompiler">
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="com.gigadevice.mbs.riscv.option.CCompiler.includes.paths.504857238" name="Include paths (-I)" superClass="com.gigadevice.mbs.riscv.option.CCompiler.includes.paths" useByScannerDiscovery="true" valueType="includePath">
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\alicloud\src\infra\log&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\azure-sdk-for-c\sdk\inc\azure&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\freertos-src\FreeRTOS-Plus\Source\Utilities\logging&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\azure-sdk-for-c\sdk\inc\azure\iot&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\azure-sdk-for-c\sdk\inc&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\azure-sdk-for-c\sdk\inc\azure\iot\internal&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\azure-sdk-for-c\sdk\src\azure\core&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\azure-sdk-for-c\sdk\src\azure\iot&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\coreMQTT\source\include&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\coreHTTP\source\include&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\coreHTTP\source\interface&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\coreHTTP\source\http_parser&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\coreHTTP\source\dependency\3rdparty\http_parser&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\coreMQTT\source\interface&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\azure-sdk-for-c\sdk\inc\azure\core&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\libraries\azure-sdk-for-c\sdk\inc\azure\core\internal&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\source&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\source\include&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\source\interface&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\demos\projects\GD32VW553\config&quot;"/>
+									<listOptionValue builtIn="false" value="&quot;..\..\..\..\..\..\cloud\azureiot\libs\azure-iot-middleware-freertos\ports\coreMQTT&quot;"/>
+								</option>
+								<option id="com.gigadevice.mbs.riscv.option.CCompiler.general.std.735388983" name="C Standard" superClass="com.gigadevice.mbs.riscv.option.CCompiler.general.std" useByScannerDiscovery="false" value="com.gigadevice.mbs.option.toolSettings.CCompiler.std.c99" valueType="enumerated"/>
+								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="com.gigadevice.mbs.riscv.option.CCompiler.symbols.defs.1301007945" name="Define (-D)" superClass="com.gigadevice.mbs.riscv.option.CCompiler.symbols.defs" useByScannerDiscovery="true" valueType="definedSymbols">
+									<listOptionValue builtIn="false" value="SUPPORT_TLS"/>
+									<listOptionValue builtIn="false" value="COMPATIBLE_LK_KV"/>
+									<listOptionValue builtIn="false" value="COAP_SERV_MULTITHREAD"/>
+									<listOptionValue builtIn="false" value="AWSS_SUPPORT_APLIST"/>
+									<listOptionValue builtIn="false" value="MQTT_AUTO_SUBSCRIBE"/>
+									<listOptionValue builtIn="false" value="MQTT_COMM_ENABLED"/>
+									<listOptionValue builtIn="false" value="DEVICE_MODEL_ENABLED"/>
+									<listOptionValue builtIn="false" value="DEV_BIND_ENABLED"/>
+									<listOptionValue builtIn="false" value="OTA_ENABLED"/>
+									<listOptionValue builtIn="false" value="WIFI_PROVISION_ENABLED"/>
+									<listOptionValue builtIn="false" value="AWSS_SUPPORT_DEV_AP"/>
+									<listOptionValue builtIn="false" value="AWSS_SUPPORT_SMARTCONFIG"/>
+								</option>
+								<option id="com.gigadevice.mbs.riscv.option.CCompiler.general.hideInfo.76246998" superClass="com.gigadevice.mbs.riscv.option.CCompiler.general.hideInfo" useByScannerDiscovery="false" value="/.lds^.lds^0x20008000^2^0x08000000^128^0x20000000^32^FLASH^0x08000000^4096^0x20000000^288^0x20000000^24^0x20006000^8" valueType="string"/>
+								<inputType id="com.gigadevice.mbs.riscv.inputType.CCompiler.564633451" superClass="com.gigadevice.mbs.riscv.inputType.CCompiler"/>
+							</tool>
+							<tool id="com.gigadevice.mbs.riscv.tool.objcopy.hex.359303647" name="GD RISC-V MCU Flash Image(Hex)" superClass="com.gigadevice.mbs.riscv.tool.objcopy.hex"/>
+							<tool id="com.gigadevice.mbs.riscv.tool.objcopy.bin.749704941" name="GD RISC-V MCU Flash Image(Bin)" superClass="com.gigadevice.mbs.riscv.tool.objcopy.bin"/>
+							<tool command="riscv-nuclei-elf-ar" commandLinePattern="${COMMAND} ${FLAGS} ${OUTPUT_FLAG}  ${OUTPUT_PREFIX}${OUTPUT} ${INPUTS}" id="com.gigadevice.mbs.riscv.tool.archiver.1423763810" name="GD RISC-V MCU Archiver" superClass="com.gigadevice.mbs.riscv.tool.archiver">
+								<option id="gnu.both.lib.option.flags.1099686272" name="Archiver flags" superClass="gnu.both.lib.option.flags" useByScannerDiscovery="false" value="-r" valueType="string"/>
+								<outputType id="cdt.managedbuild.tool.gnu.archiver.output.1468552683" outputPrefix="" superClass="cdt.managedbuild.tool.gnu.archiver.output"/>
+							</tool>
+							<tool id="com.gigadevice.mbs.riscv.tool.objdump.list.933940569" name="GD RISC-V MCU Listing" superClass="com.gigadevice.mbs.riscv.tool.objdump.list"/>
+							<tool id="com.gigadevice.mbs.riscv.tool.size.822592733" name="GD RISC-V MCU Print Size" superClass="com.gigadevice.mbs.riscv.tool.size"/>
+							<tool id="com.gigadevice.mbs.riscv.tool.objdump.dump.1669005948" name="GD RISC-V MCU Dump" superClass="com.gigadevice.mbs.riscv.tool.objdump.dump"/>
+							<tool id="com.gigadevice.mbs.riscv.tool.CppCompiler.602051430" name="GD RISC-V MCU C++ Compiler" superClass="com.gigadevice.mbs.riscv.tool.CppCompiler"/>
+							<tool id="com.gigadevice.mbs.riscv.tool.cpp.linker.442453475" name="GD RISC-V MCU C++ Linker" superClass="com.gigadevice.mbs.riscv.tool.cpp.linker"/>
+						</toolChain>
+					</folderInfo>
+				</configuration>
+			</storageModule>
+			<storageModule moduleId="org.eclipse.cdt.core.externalSettings"/>
+		</cconfiguration>
+	</storageModule>
+	<storageModule moduleId="cdtBuildSystem" version="4.0.0">
+		<project id="ble.ilg.gnumcueclipse.managedbuild.cross.riscv.target.elf.1941109894" name="Executable"/>
+	</storageModule>
+	<storageModule moduleId="org.eclipse.cdt.core.LanguageSettingsProviders"/>
+	<storageModule moduleId="org.eclipse.cdt.make.core.buildtargets"/>
+	<storageModule moduleId="refreshScope" versionNumber="2">
+		<configuration configurationName="azure_lib_out"/>
+		<configuration configurationName="azure_lib">
+			<resource resourceType="PROJECT" workspacePath="/azure_lib"/>
+		</configuration>
+	</storageModule>
+	<storageModule moduleId="scannerConfiguration">
+		<autodiscovery enabled="true" problemReportingEnabled="true" selectedProfileId=""/>
+		<scannerConfigBuildInfo instanceId="ilg.gnumcueclipse.managedbuild.cross.riscv.config.elf.debug.2079349332;ilg.gnumcueclipse.managedbuild.cross.riscv.config.elf.debug.2079349332.;ilg.gnumcueclipse.managedbuild.cross.riscv.tool.c.compiler.1963494315;ilg.gnumcueclipse.managedbuild.cross.riscv.tool.c.compiler.input.138986505">
+			<autodiscovery enabled="true" problemReportingEnabled="true" selectedProfileId=""/>
+		</scannerConfigBuildInfo>
+		<scannerConfigBuildInfo instanceId="ilg.gnumcueclipse.managedbuild.cross.riscv.config.elf.release.1315707908;ilg.gnumcueclipse.managedbuild.cross.riscv.config.elf.release.1315707908.;ilg.gnumcueclipse.managedbuild.cross.riscv.tool.c.compiler.1714281415;ilg.gnumcueclipse.managedbuild.cross.riscv.tool.c.compiler.input.739689176">
+			<autodiscovery enabled="true" problemReportingEnabled="true" selectedProfileId=""/>
+		</scannerConfigBuildInfo>
+	</storageModule>
+</cproject>

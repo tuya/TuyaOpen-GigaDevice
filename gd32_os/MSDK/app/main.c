@@ -57,8 +57,6 @@ OF SUCH DAMAGE.
 #include "azure_entry.h"
 #endif
 
-#include "mp3_play.h"
-
 /*!
     \brief      Init applications.
                 This function is called to initialize all the applications.
@@ -73,13 +71,7 @@ static void user_init_task(void *param)
 {
     (void)param;
     wifi_wait_ready();
-#ifdef CONFIG_MP3_PLAY_ENABLE
-    mp3_wait_ready();
-    // ble_task_ready();
-#ifdef ES8375_USED
-    es8375_init();
-#endif
-#endif /* CONFIG_MP3_PLAY_ENABLE */
+
     tuya_app_main();
 
     sys_task_delete(NULL);
@@ -98,9 +90,6 @@ static void application_init(void)
     }
 #endif
 
-#ifdef CONFIG_MP3_PLAY_ENABLE
-    mp3_init();
-#endif /* CONFIG_MP3_PLAY_ENABLE */
     util_init();
 
     user_setting_init();

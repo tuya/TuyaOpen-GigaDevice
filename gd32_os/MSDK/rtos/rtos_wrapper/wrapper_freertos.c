@@ -713,9 +713,8 @@ void sys_sema_free(os_sema_t *sema)
 */
 void sys_sema_up(os_sema_t *sema)
 {
-    if (xSemaphoreGive(*sema) != pdPASS) {
-        // dbg_print(ERR, "sys_sema_up, give semaphore error\r\n");
-    }
+    if (xSemaphoreGive(*sema) != pdPASS)
+        dbg_print(ERR, "sys_sema_up, give semaphore error\r\n");
 }
 
 /*!

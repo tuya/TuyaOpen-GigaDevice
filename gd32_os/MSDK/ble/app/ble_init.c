@@ -98,6 +98,7 @@ OF SUCH DAMAGE.
 extern void tkl_virtual_hci_init(void);
 #else
 extern void tuya_adp_init(uint8_t role);
+extern void tuya_adp_deinit(void);
 #endif
 #endif
 
@@ -468,7 +469,7 @@ void ble_init(bool all)
 #else
     // Workaround for tuya project
     // If Tuya change the workflow, this code can be removed
-    tuya_adp_init(3);
+    tuya_adp_init(0x3);
 #endif
 #endif
 
@@ -485,6 +486,7 @@ void ble_init(bool all)
 */
 void ble_deinit(void)
 {
+#ifndef TUYAOS_SUPPORT
     raw_flash_erase_handler_unregister(ble_flash_erase_handler);
 
 #if (BLE_APP_SUPPORT)
@@ -496,5 +498,7 @@ void ble_deinit(void)
     ble_irq_disable();
 
     sys_sema_free(&ble_ready_sem);
+#else
+    tuya_adp_deinit();
+#endif
 }
-

@@ -208,7 +208,7 @@ We use --gc-sections when linking, so there is no harm is setting all of these t
     }
 
 #ifdef CONFIG_AWS_IOT_SUPPORT
-undef configASSERT
+#undef configASSERT
 #endif /* CONFIG_AWS_IOT_SUPPORT */
 
 #ifdef CONFIG_AZURE_IOT_SUPPORT
