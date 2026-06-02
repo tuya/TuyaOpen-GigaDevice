@@ -42,6 +42,9 @@ AESTOOL=${ROOT}/scripts/imgtool/aestool.py
 SREC_CAT=${ROOT}/scripts/imgtool/srec_cat.exe
 OUTPUT_PATH=${ROOT}/scripts/images
 DOWNLOAD_BIN=${OUTPUT_PATH}/mbl-sys${AES_SUFFIX}.bin
+if [ ! -d "${OUTPUT_PATH}" ]; then
+    mkdir -p "${OUTPUT_PATH}"
+fi
 
 # Generate dump and bin file
 if [[ ${TOOLKIT} != "IAR" ]];then

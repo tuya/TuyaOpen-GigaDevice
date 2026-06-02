@@ -75,6 +75,7 @@ set GENTOOL=%ROOT%\scripts\imgtool\gentool.py
 set AESTOOL=%ROOT%\scripts\imgtool\aestool.py
 set SREC_CAT=%ROOT%\scripts\imgtool\srec_cat.exe
 set OUTPUT_PATH=%ROOT%\\scripts\\images\\
+if not exist "%OUTPUT_PATH%" mkdir "%OUTPUT_PATH%"
 set DOWNLOAD_BIN=%OUTPUT_PATH%\\mbl-sys%AES_SUFFIX%.bin
 
 :: Generate dump and bin file
