@@ -27,7 +27,7 @@ extern "C" {
  */
 typedef struct {
     OPERATE_RET (*init)(WIFI_EVENT_CB cb);
-    OPERATE_RET (*scan_ap)(const int8_t *ssid, AP_IF_S **ap_ary, UINT_T *num);
+    OPERATE_RET (*scan_ap)(const int8_t *ssid, AP_IF_S **ap_ary, uint32_t *num);
     OPERATE_RET (*release_ap)(AP_IF_S *ap);
     OPERATE_RET (*start_ap)(const WF_AP_CFG_IF_S *cfg);
     OPERATE_RET (*stop_ap)(void);
@@ -50,7 +50,7 @@ typedef struct {
     OPERATE_RET (*station_disconnect)(void);
     OPERATE_RET (*station_get_conn_ap_rssi)(int8_t *rssi);
     OPERATE_RET (*station_get_status)(WF_STATION_STAT_E *stat);
-    OPERATE_RET (*send_mgnt)(const uint8_t *buf, const UINT_T len);
+    OPERATE_RET (*send_mgnt)(const uint8_t *buf, const uint32_t len);
     OPERATE_RET (*register_recv_mgnt_callback)(const BOOL_T enable, const WIFI_REV_MGNT_CB recv_cb);
     OPERATE_RET (*ioctl)(WF_IOCTL_CMD_E cmd, void *args);
 } TKL_WIFI_DESC_T;
@@ -68,7 +68,7 @@ TKL_WIFI_DESC_T *tkl_wifi_desc_get(void);
  *
  */
 typedef struct {
-    OPERATE_RET (*ioctl)(int dev, int vif_index, UINT_T cmd, UINT_T arg);
+    OPERATE_RET (*ioctl)(int dev, int vif_index, uint32_t cmd, uint32_t arg);
 } TKL_WIFI_HOSTAP_DESC_T;
 
 /**

@@ -28,16 +28,16 @@
 typedef struct {
     char   ssid[WIFI_SSID_LEN + 1];       // ssid
     uint8_t  passwd[WIFI_PASSWD_LEN + 1];   // password
-    UINT_T akm;                           // auth mode
+    uint32_t akm;                           // auth mode
     uint8_t  channel;                       // channel
-    UINT_T ip_goted;                      // last got ip
+    uint32_t ip_goted;                      // last got ip
 }FAST_WF_CONNECTED_AP_INFO_S;
 
 static WIFI_EVENT_CB tkl_wifi_event_callback = NULL;
 static SNIFFER_CALLBACK tkl_wifi_sniffer_cb = NULL;
 static WIFI_REV_MGNT_CB tkl_wifi_recv_cb = NULL;
 
-extern uint16_t mgmt_wait_queue_fetch(uint8_t vif_idx, uint8_t evt, UINT_T timeout_ms);
+extern uint16_t mgmt_wait_queue_fetch(uint8_t vif_idx, uint8_t evt, uint32_t timeout_ms);
 extern int mgmt_wait_queue_flush(void);
 
 static void tkl_wifi_connected_callback(void *eloop_data, void *user_ctx)
@@ -187,7 +187,7 @@ static void scan_result_transfer(struct mac_scan_result *result, AP_IF_S *ap_inf
  *
  * @note if ssid == NULL means scan all ap, otherwise means scan the specific ssid
  */
-OPERATE_RET tkl_wifi_scan_ap(const int8_t *ssid, AP_IF_S **ap_ary, UINT_T *num)
+OPERATE_RET tkl_wifi_scan_ap(const int8_t *ssid, AP_IF_S **ap_ary, uint32_t *num)
 {
     // --- BEGIN: user implements ---
 #if 0 // scan not block
@@ -234,7 +234,7 @@ OPERATE_RET tkl_wifi_scan_ap(const int8_t *ssid, AP_IF_S **ap_ary, UINT_T *num)
     for (i = 0; i < results->result_cnt; i++) {
         scan_result_transfer((results->result + i), &ap_info[i]);
     }
-    *num = (UINT_T)results->result_cnt;
+    *num = (uint32_t)results->result_cnt;
     *ap_ary = ap_info;
 
     tkl_system_free(results);
@@ -274,7 +274,7 @@ OPERATE_RET tkl_wifi_release_ap(AP_IF_S *ap)
 OPERATE_RET tkl_wifi_start_ap(const WF_AP_CFG_IF_S *cfg)
 {
     // --- BEGIN: user implements ---
-    UINT_T auth_mode = 0;
+    uint32_t auth_mode = 0;
 
     if (NULL == cfg) {
         return OPRT_INVALID_PARM;
@@ -492,11 +492,11 @@ OPERATE_RET tkl_wifi_set_ip(const WF_IF_E wf, NW_IP_S *ip)
         ip_cfg.mode = IP_ADDR_DHCP_SERVER;
     }
 
-    if (!inet_aton(ip->ip, (UINT_T *)&ip_cfg.ipv4.addr))
+    if (!inet_aton(ip->ip, (uint32_t *)&ip_cfg.ipv4.addr))
         goto Fail;
-    if (!inet_aton(ip->gw, (UINT_T *)&ip_cfg.ipv4.gw))
+    if (!inet_aton(ip->gw, (uint32_t *)&ip_cfg.ipv4.gw))
         goto Fail;
-    if (!inet_aton(ip->mask, (UINT_T *)&ip_cfg.ipv4.mask))
+    if (!inet_aton(ip->mask, (uint32_t *)&ip_cfg.ipv4.mask))
         goto Fail;
 
     if (!wifi_set_vif_ip(fvif_idx, &ip_cfg))
@@ -682,7 +682,7 @@ OPERATE_RET tkl_wifi_get_connected_ap_info(FAST_WF_CONNECTED_AP_INFO_T **fast_ap
 {
     // --- BEGIN: user implements ---
     FAST_WF_CONNECTED_AP_INFO_T *ap_info_buf = NULL;
-    UINT_T len = sizeof(FAST_WF_CONNECTED_AP_INFO_S);
+    uint32_t len = sizeof(FAST_WF_CONNECTED_AP_INFO_S);
     FAST_WF_CONNECTED_AP_INFO_S ap_info = {0};
     struct wifi_vif_tag *wvif = (struct wifi_vif_tag *)vif_idx_to_wvif(WIFI_VIF_INDEX_DEFAULT);
     struct wifi_sta *sta = NULL;
@@ -757,7 +757,7 @@ OPERATE_RET tkl_wifi_get_bssid(uint8_t *mac)
 OPERATE_RET tkl_wifi_set_country_code(const COUNTRY_CODE_E ccode)
 {
     // --- BEGIN: user implements ---
-    UINT_T country_code = 0;
+    uint32_t country_code = 0;
 
     switch (ccode) {
     case COUNTRY_CODE_CN:
@@ -1008,7 +1008,7 @@ OPERATE_RET tkl_wifi_station_get_status(WF_STATION_STAT_E *stat)
  * @param[in]       len         length of buffer
  * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
  */
-OPERATE_RET tkl_wifi_send_mgnt(const uint8_t *buf, const UINT_T len)
+OPERATE_RET tkl_wifi_send_mgnt(const uint8_t *buf, const uint32_t len)
 {
     // --- BEGIN: user implements ---
     if (wifi_send_80211_frame(WIFI_VIF_INDEX_DEFAULT, buf, len, 0, NULL, NULL) == 0)
@@ -1047,14 +1047,14 @@ OPERATE_RET tkl_wifi_register_recv_mgnt_callback(const BOOL_T enable, const WIFI
     // --- END: user implements ---
 }
 
-static OPERATE_RET tkl_wifi_get_all_sta_info(WF_STA_INFO_S **sta_ary, UINT_T *num)
+static OPERATE_RET tkl_wifi_get_all_sta_info(WF_STA_INFO_S **sta_ary, uint32_t *num)
 {
     OPERATE_RET ret = OPRT_OK;
     WF_STA_INFO_S *p_sta = NULL, *temp = NULL;
     struct mac_addr cli_mac[CFG_STA_NUM];
     int32_t cli_num = 0, j = 0;
     int32_t fvif_idx = WIFI_VIF_INDEX_DEFAULT;
-    UINT_T ip_addr = 0;
+    uint32_t ip_addr = 0;
 
     if (sta_ary == NULL || num == NULL)
         return OPRT_INVALID_PARM;

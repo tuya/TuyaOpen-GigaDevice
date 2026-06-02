@@ -1732,9 +1732,9 @@ static ble_status_t ble_tuya_rw_cb(ble_gatts_msg_info_t *p_cb_data)
             event.conn_handle = p_dev->conn_handle;
             ble_gatts_get_start_hdl(p_ntf_ind->svc_id, &srv_handle);
 
-            event.result = (INT_T)p_ntf_ind->status;
+            event.result = (int)p_ntf_ind->status;
             event.gatt_event.notify_result.char_handle = srv_handle + p_ntf_ind->att_idx;
-            event.gatt_event.notify_result.result = (INT_T)p_ntf_ind->status;
+            event.gatt_event.notify_result.result = (int)p_ntf_ind->status;
             if (gatt_evt_cb) {
                 gatt_evt_cb(&event);
             }
