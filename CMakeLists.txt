@@ -181,7 +181,14 @@ if(TARGET ${TARGET_EXE})
         if(PLATFORM_NEED_LIBS)
             string(REPLACE " " ";" _PREBUILT_LIBS_LIST "${PLATFORM_NEED_LIBS}")
             foreach(_pl ${_PREBUILT_LIBS_LIST})
-                list(APPEND _GROUP_ARCHIVES ${_pl})
+                # Use archive file paths so Ninja tracks mtime and relinks when
+                # libtuyaapp.a / libtuyaos.a are rebuilt in the Open SDK .build tree.
+                set(_prebuilt "${OPEN_LIBS_DIR}/lib${_pl}.a")
+                if(EXISTS "${_prebuilt}")
+                    list(APPEND _GROUP_ARCHIVES "${_prebuilt}")
+                else()
+                    list(APPEND _GROUP_ARCHIVES ${_pl})
+                endif()
             endforeach()
         endif()
         # 将 MSDK/lib/ 中的预编译库同样纳入本组，解决跨组符号引用问题：
