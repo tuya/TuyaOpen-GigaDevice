@@ -63,4 +63,3 @@ OPERATE_RET tkl_log_open(void)
     return OPRT_OK;
     // --- END: user implements ---
 }
-

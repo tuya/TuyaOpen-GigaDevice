@@ -70,7 +70,7 @@ void *tkl_system_memset(void* src, int ch, const size_t n)
     // --- BEGIN: user implements ---
     sys_memset(src, ch, n);
 
-    return 0;
+    return src;
     // --- END: user implements ---
 }
 
@@ -88,7 +88,7 @@ void *tkl_system_memcpy(void* src, const void* dst, const size_t n)
     // --- BEGIN: user implements ---
     sys_memcpy(src, dst, n);
 
-    return 0;
+    return src;
     // --- END: user implements ---
 }
 

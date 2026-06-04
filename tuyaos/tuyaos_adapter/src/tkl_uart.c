@@ -276,6 +276,10 @@ int tkl_uart_write(TUYA_UART_NUM_E port_id, void *buff, uint16_t len)
     uint8_t *src = (uint8_t *)buff;
     int tx_count = 0;
 
+    if (buff == NULL || len == 0) {
+        return OPRT_OS_ADAPTER_UART_SEND_FAILED;
+    }
+
     if ((port_id & 0xffff) == TUYA_UART_NUM_0) {
         usart_periph = USART0;
     } else if ((port_id & 0xffff) == TUYA_UART_NUM_1) {
@@ -283,7 +287,7 @@ int tkl_uart_write(TUYA_UART_NUM_E port_id, void *buff, uint16_t len)
     } else if ((port_id & 0xffff) == TUYA_UART_NUM_2) {
         usart_periph = UART2;
     } else {
-        return OPRT_OS_ADAPTER_UART_INIT_FAILED;
+        return OPRT_OS_ADAPTER_UART_SEND_FAILED;
     }
 
     if (len == 0) {
@@ -305,6 +309,7 @@ int tkl_uart_write(TUYA_UART_NUM_E port_id, void *buff, uint16_t len)
 void tuya_uart_irq_hdl(uint32_t uart)
 {
     uint8_t i;
+
     TUYA_UART_NUM_E port_id = TUYA_UART_NUM_MAX;
 
     if (uart == USART0) {
@@ -317,7 +322,7 @@ void tuya_uart_irq_hdl(uint32_t uart)
         return;
     }
 
-    if (RESET != usart_interrupt_flag_get(USART0, USART_INT_FLAG_TC)) {
+    if (RESET != usart_interrupt_flag_get(uart, USART_INT_FLAG_TC)) {
         usart_interrupt_disable(uart, USART_INT_TC);
         for (i = 0; i < TUYA_UART_NUM_MAX; i++) {
             if (uart_tx_cbs[i].port_id == port_id && uart_tx_cbs[i].callback != NULL) {
@@ -329,7 +334,7 @@ void tuya_uart_irq_hdl(uint32_t uart)
         return;
     }
 
-    if (RESET != usart_interrupt_flag_get(USART0, USART_INT_FLAG_RBNE)) {
+    if (RESET != usart_interrupt_flag_get(uart, USART_INT_FLAG_RBNE)) {
         usart_interrupt_disable(uart, USART_INT_RBNE);
         for (i = 0; i < TUYA_UART_NUM_MAX; i++) {
             if (uart_rx_cbs[i].port_id == port_id && uart_rx_cbs[i].callback != NULL) {
@@ -444,6 +449,10 @@ int tkl_uart_read(TUYA_UART_NUM_E port_id, void *buff, uint16_t len)
     int cnt = 0;
     uint32_t usart_periph;
 
+    if (buff == NULL || len == 0) {
+        return OPRT_OS_ADAPTER_UART_SEND_FAILED;
+    }
+
     if ((port_id & 0xffff) == TUYA_UART_NUM_0) {
         usart_periph = USART0;
     } else if ((port_id & 0xffff) == TUYA_UART_NUM_1) {
@@ -451,7 +460,7 @@ int tkl_uart_read(TUYA_UART_NUM_E port_id, void *buff, uint16_t len)
     } else if ((port_id & 0xffff) == TUYA_UART_NUM_2) {
         usart_periph = UART2;
     } else {
-        return OPRT_OS_ADAPTER_UART_INIT_FAILED;
+        return OPRT_OS_ADAPTER_UART_SEND_FAILED;
     }
 
     while (1)
@@ -594,4 +603,3 @@ OPERATE_RET tkl_uart_ioctl(TUYA_UART_NUM_E port_id, uint32_t cmd, void *arg)
     return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }
-
