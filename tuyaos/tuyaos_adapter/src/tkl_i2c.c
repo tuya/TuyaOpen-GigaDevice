@@ -39,11 +39,14 @@ static uint32_t i2c_port_transfer(TUYA_I2C_NUM_E port)
     switch (port) {
     case TUYA_I2C_NUM_0:
         i2c_port = I2C0;
+        break;
     case TUYA_I2C_NUM_1:
         i2c_port = I2C1;
+        break;
     default:
         break;
     }
+
     return i2c_port;
 }
 
@@ -52,60 +55,40 @@ static TUYA_IIC_IRQ_EVT_E i2c_irq_source_get(uint32_t i2c_port)
     TUYA_IIC_IRQ_EVT_E event = TUYA_IIC_EVENT_TRANSFER_DONE;
 
     /* transmit */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_TI)) {
+    if (i2c_interrupt_flag_get(i2c_port, I2C_INT_FLAG_TI)) {
         event = TUYA_IIC_EVENT_SLAVE_RECEIVE;
     }
 
     /* I2C_RDATA is not empty during receiving */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_RBNE)) {
+    if (i2c_interrupt_flag_get(i2c_port, I2C_INT_FLAG_RBNE)) {
         event = TUYA_IIC_EVENT_SLAVE_TRANSMIT;
     }
 
     /* not acknowledge */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_NACK)) {
+    if (i2c_interrupt_flag_get(i2c_port, I2C_INT_FLAG_NACK)) {
         event = TUYA_IIC_EVENT_ADDRESS_NACK;
     }
 
     /* transfer complete in master mode */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_TC)) {
+    if (i2c_interrupt_flag_get(i2c_port, I2C_INT_FLAG_TC)) {
         event = TUYA_IIC_EVENT_TRANSFER_DONE;
     }
 
     /* bus error */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_BERR)) {
+    if (i2c_interrupt_flag_get(i2c_port, I2C_INT_FLAG_BERR)) {
         event = TUYA_IIC_EVENT_BUS_ERROR;
     }
 
     /* arbitration lost */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_LOSTARB)) {
+    if (i2c_interrupt_flag_get(i2c_port, I2C_INT_FLAG_LOSTARB)) {
         event = TUYA_IIC_EVENT_ARBITRATION_LOST;
     }
 
     /* timeout error */
-    if(i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_TIMEOUT)) {
+    if(i2c_interrupt_flag_get(i2c_port, I2C_INT_FLAG_TIMEOUT)) {
         event = TUYA_IIC_EVENT_BUS_CLEAR;
     }
     return event;
-#if 0
-    /* address received matches in slave mode */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_ADDSEND)) {
-    }
-    /* stop condition detected in slave mode */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_STPDET)) {
-    }
-    /* transfer complete reload */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_TCR)) {
-    }
-    /* over-run or under-run when SCL stretch is disabled */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_OUERR)) {
-    }
-    /* PEC error */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_PECERR)) {
-    }
-    /* SMBus alert */
-    if (i2c_interrupt_flag_get(I2C1, I2C_INT_FLAG_SMBALT)) {
-    }
-#endif
 }
 
 static void i2c_irq_flag_clear(uint32_t i2c_port, TUYA_IIC_IRQ_EVT_E event)
@@ -619,4 +602,3 @@ OPERATE_RET tkl_i2c_ioctl(TUYA_I2C_NUM_E port, uint32_t cmd, void *args)
     return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }
-

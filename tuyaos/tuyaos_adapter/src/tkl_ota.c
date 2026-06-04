@@ -145,6 +145,10 @@ OPERATE_RET tkl_ota_data_process(TUYA_OTA_DATA_T *pack, uint32_t *remain_len)
     int32_t ret = 0;
     uint32_t remain_length = 0;
 
+    if (pack == NULL || remain_len == NULL || ug_proc == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
     *remain_len = pack->len;
     if ((pack->len < IMAGE_WRITE_SIZE) && (ug_proc->recv_data_cnt <= (pack->total_len - IMAGE_WRITE_SIZE))) {
         return OPRT_OK;
@@ -242,4 +246,3 @@ OPERATE_RET tkl_ota_get_old_firmware_info(TUYA_OTA_FIRMWARE_INFO_T **info)
     return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }
-

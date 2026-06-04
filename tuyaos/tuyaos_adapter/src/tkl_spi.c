@@ -15,6 +15,7 @@
 #include "tuya_error_code.h"
 #include "gd32vw55x_spi.h"
 #include "gd32vw55x_rcu.h"
+#include "gd32vw55x_dma.h"
 #include "wrapper_os.h"
 #include "dbg_print.h"
 // --- END: user defines and implements ---
@@ -47,6 +48,8 @@ typedef struct spi_env
 static spi_env_t spi_env_info;
 static BOOL_T spi_irq_en = FALSE;
 static TUYA_SPI_IRQ_CB spi_irq_cb = NULL;
+static uint8_t s_spi_tx_dummy = 0x00;  /* dummy TX byte used when send_buf is NULL    */
+static uint8_t s_spi_rx_discard;       /* discard RX byte used when receive_buf is NULL */
 
 static void tkl_spi_disable_irqs()
 {
@@ -57,7 +60,7 @@ static void tkl_spi_disable_irqs()
     }
 }
 
-static void tkl_spi_tx_dma_conf(void *data, uint16_t size)
+static void tkl_spi_tx_dma_conf(void *data, uint16_t size, uint32_t mem_inc)
 {
     dma_single_data_parameter_struct dma_init_struct;
 
@@ -74,7 +77,7 @@ static void tkl_spi_tx_dma_conf(void *data, uint16_t size)
     dma_init_struct.priority            = DMA_PRIORITY_LOW;
     dma_init_struct.number              = size;
     dma_init_struct.periph_inc          = DMA_PERIPH_INCREASE_DISABLE;
-    dma_init_struct.memory_inc          = DMA_MEMORY_INCREASE_ENABLE;
+    dma_init_struct.memory_inc          = mem_inc;
     dma_init_struct.circular_mode       = DMA_CIRCULAR_MODE_DISABLE;
     dma_single_data_mode_init(SPI_DMA_TX, &dma_init_struct);
     dma_channel_subperipheral_select(SPI_DMA_TX, DMA_SUBPERI3);
@@ -94,7 +97,7 @@ static void tkl_spi_tx_dma_conf(void *data, uint16_t size)
     dma_channel_enable(SPI_DMA_TX);
 }
 
-static void tkl_spi_rx_dma_conf(void *data, uint16_t size)
+static void tkl_spi_rx_dma_conf(void *data, uint16_t size, uint32_t mem_inc)
 {
     dma_single_data_parameter_struct dma_init_struct;
 
@@ -111,7 +114,7 @@ static void tkl_spi_rx_dma_conf(void *data, uint16_t size)
     dma_init_struct.priority            = DMA_PRIORITY_HIGH;
     dma_init_struct.number              = size;
     dma_init_struct.periph_inc          = DMA_PERIPH_INCREASE_DISABLE;
-    dma_init_struct.memory_inc          = DMA_MEMORY_INCREASE_ENABLE;
+    dma_init_struct.memory_inc          = mem_inc;
     dma_init_struct.circular_mode       = DMA_CIRCULAR_MODE_DISABLE;
     dma_single_data_mode_init(SPI_DMA_RX, &dma_init_struct);
     dma_channel_subperipheral_select(SPI_DMA_RX, DMA_SUBPERI3);
@@ -171,7 +174,7 @@ void DMA_Channel4_IRQHandler(void)
         spi_disable();
     }
 
-    if (spi_env_info.send_buf == NULL) {
+    if (spi_env_info.send_buf != NULL) {
         sys_mfree(spi_env_info.send_buf);
         spi_env_info.send_buf = NULL;
     }
@@ -220,7 +223,7 @@ void DMA_Channel0_IRQHandler(void)
         spi_disable();
     }
 
-    if (spi_env_info.receive_buf == NULL) {
+    if (spi_env_info.receive_buf != NULL) {
         sys_mfree(spi_env_info.receive_buf);
         spi_env_info.receive_buf = NULL;
     }
@@ -466,12 +469,12 @@ OPERATE_RET tkl_spi_deinit(TUYA_SPI_NUM_E port)
     /* wait for SPI stability */
     sys_ms_sleep(10);
 
-    if (spi_env_info.send_buf == NULL) {
+    if (spi_env_info.send_buf != NULL) {
         sys_mfree(spi_env_info.send_buf);
         spi_env_info.send_buf = NULL;
     }
 
-    if (spi_env_info.receive_buf == NULL) {
+    if (spi_env_info.receive_buf != NULL) {
         sys_mfree(spi_env_info.receive_buf);
         spi_env_info.receive_buf = NULL;
     }
@@ -528,7 +531,7 @@ OPERATE_RET tkl_spi_send(TUYA_SPI_NUM_E port, void *data, uint32_t size)
     }
 
     spi_env_info.op_msk = SPI_SEND_OP_MSK;
-    tkl_spi_tx_dma_conf(data, size);
+    tkl_spi_tx_dma_conf(data, size, DMA_MEMORY_INCREASE_ENABLE);
     spi_dma_enable(SPI_DMA_TRANSMIT);
 
     if (spi_env_info.spi_param.nss == SPI_NSS_SOFT) {
@@ -621,7 +624,7 @@ OPERATE_RET tkl_spi_recv(TUYA_SPI_NUM_E port, void *data, uint32_t size)
     }
 
     spi_env_info.op_msk = SPI_RECV_OP_MSK;
-    tkl_spi_rx_dma_conf(data, size);
+    tkl_spi_rx_dma_conf(data, size, DMA_MEMORY_INCREASE_ENABLE);
     spi_dma_enable(SPI_DMA_RECEIVE);
 
     if (spi_env_info.spi_param.nss == SPI_NSS_SOFT) {
@@ -679,6 +682,8 @@ OPERATE_RET tkl_spi_recv(TUYA_SPI_NUM_E port, void *data, uint32_t size)
 OPERATE_RET tkl_spi_transfer(TUYA_SPI_NUM_E port, void *send_buf, void *receive_buf, uint32_t length)
 {
     OPERATE_RET status = OPRT_OK;
+    void *tx_buf, *rx_buf;
+    uint32_t tx_mem_inc, rx_mem_inc;
 
     if (port >= SPI_DEV_NUM) {
         return OPRT_NOT_SUPPORTED;
@@ -687,25 +692,10 @@ OPERATE_RET tkl_spi_transfer(TUYA_SPI_NUM_E port, void *send_buf, void *receive_
     if (spi_env_info.role != TUYA_SPI_ROLE_MASTER && spi_env_info.role != TUYA_SPI_ROLE_SLAVE)
         return OPRT_NOT_SUPPORTED;
 
-    if (send_buf == NULL || receive_buf == NULL) {
-        uint8_t unit = spi_env_info.spi_param.frame_size == SPI_FRAMESIZE_8BIT ? 1 : 2;
-
-        if (send_buf == NULL) {
-            spi_env_info.send_buf = sys_malloc(unit *length);
-            if (spi_env_info.send_buf == NULL) {
-                status = OPRT_MALLOC_FAILED;
-                goto done;
-            }
-        }
-
-        if (receive_buf == NULL) {
-            spi_env_info.receive_buf = sys_malloc(unit *length);
-            if (spi_env_info.receive_buf == NULL) {
-                status = OPRT_MALLOC_FAILED;
-                goto done;
-            }
-        }
-    }
+    tx_buf = (send_buf != NULL) ? send_buf : (void *)&s_spi_tx_dummy;
+    rx_buf = (receive_buf != NULL) ? receive_buf : (void *)&s_spi_rx_discard;
+    tx_mem_inc = (send_buf != NULL) ? DMA_MEMORY_INCREASE_ENABLE : DMA_MEMORY_INCREASE_DISABLE;
+    rx_mem_inc = (receive_buf != NULL) ? DMA_MEMORY_INCREASE_ENABLE : DMA_MEMORY_INCREASE_DISABLE;
 
     if (spi_env_info.spi_param.nss == SPI_NSS_HARD && spi_env_info.role == TUYA_SPI_ROLE_MASTER) {
         // NSS output mode
@@ -725,8 +715,8 @@ OPERATE_RET tkl_spi_transfer(TUYA_SPI_NUM_E port, void *send_buf, void *receive_
     }
 
     spi_env_info.op_msk = SPI_TRANS_SEND_OP_MSK | SPI_TRANS_RECV_OP_MSK;
-    tkl_spi_rx_dma_conf(receive_buf, length);
-    tkl_spi_tx_dma_conf(send_buf, length);
+    tkl_spi_rx_dma_conf(rx_buf, length, rx_mem_inc);
+    tkl_spi_tx_dma_conf(tx_buf, length, tx_mem_inc);
 
     spi_dma_enable(SPI_DMA_TRANSMIT);
     spi_dma_enable(SPI_DMA_RECEIVE);
@@ -775,16 +765,6 @@ OPERATE_RET tkl_spi_transfer(TUYA_SPI_NUM_E port, void *send_buf, void *receive_
 
     spi_disable();
 
-done:
-    if (spi_env_info.send_buf == NULL) {
-        sys_mfree(spi_env_info.send_buf);
-        spi_env_info.send_buf = NULL;
-    }
-
-    if (spi_env_info.receive_buf == NULL) {
-        sys_mfree(spi_env_info.receive_buf);
-        spi_env_info.receive_buf = NULL;
-    }
     return status;
 }
 
@@ -842,12 +822,12 @@ OPERATE_RET tkl_spi_abort_transfer(TUYA_SPI_NUM_E port)
         spi_env_info.op_msk = 0;
     }
 
-    if (spi_env_info.send_buf == NULL) {
+    if (spi_env_info.send_buf != NULL) {
         sys_mfree(spi_env_info.send_buf);
         spi_env_info.send_buf = NULL;
     }
 
-    if (spi_env_info.receive_buf == NULL) {
+    if (spi_env_info.receive_buf != NULL) {
         sys_mfree(spi_env_info.receive_buf);
         spi_env_info.receive_buf = NULL;
     }
@@ -987,10 +967,10 @@ OPERATE_RET tkl_spi_ioctl(TUYA_SPI_NUM_E port, uint32_t cmd, void *args)
 
 /**
  * @brief spi get max supported dma data length.
- * 
+ *
  * @param[in] NULL
  *
- * @return >=0,number of supported dma data length. <0,err. 
+ * @return >=0,number of supported dma data length. <0,err.
  * during  tkl_spi_send, tkl_spi_recv and tkl_spi_transfer operation.
  */
 uint32_t  tkl_spi_get_max_dma_data_length(void)
@@ -999,4 +979,3 @@ uint32_t  tkl_spi_get_max_dma_data_length(void)
     return 0;
     // --- END: user implements ---
 }
-

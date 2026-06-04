@@ -104,7 +104,7 @@ OPERATE_RET tkl_queue_fetch(const TKL_QUEUE_HANDLE queue, void *msg, uint32_t ti
     }
 
     if (ret) {
-        return OPRT_OS_ADAPTER_QUEUE_SEND_FAIL;
+        return OPRT_OS_ADAPTER_QUEUE_RECV_FAIL;
     }
 
     return OPRT_OK;
