@@ -63,13 +63,16 @@ OF SUCH DAMAGE.
 #include "ble_uart.h"
 #endif
 
-#ifdef CONFIG_PLATFORM_FPGA
-#define RTC_CLOCK_SOURCE_HXTAL_DIV_RTCDIV
-#elif CONFIG_BOARD == PLATFORM_BOARD_32VW55X_START
+// #ifdef CONFIG_PLATFORM_FPGA
+// #define RTC_CLOCK_SOURCE_HXTAL_DIV_RTCDIV
+// #elif CONFIG_BOARD == PLATFORM_BOARD_32VW55X_START
+// #define RTC_CLOCK_SOURCE_IRC32K
+// #else
+// #define RTC_CLOCK_SOURCE_LXTAL
+// #endif
+
+// Use internal 32K
 #define RTC_CLOCK_SOURCE_IRC32K
-#else
-#define RTC_CLOCK_SOURCE_LXTAL
-#endif
 
 // Indicate WiFi is existed or not (CFG_WLAN_SUPPORT)
 uint8_t wifi_exist_flag = 0;
