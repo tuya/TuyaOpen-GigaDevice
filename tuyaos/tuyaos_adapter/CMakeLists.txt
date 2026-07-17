@@ -38,6 +38,7 @@ file(GLOB ADAPTER_CORE_SRC
     src/tkl_asymmetrical.c
     src/tkl_symmetry.c
     src/tkl_display.c
+    tuyaopen/tuyaopen_license.c
 )
 
 file(GLOB INIT_SRC
@@ -100,6 +101,7 @@ target_include_directories(tuyaos_adapter PUBLIC
     ${CMAKE_CURRENT_LIST_DIR}/include/watchdog
     ${CMAKE_CURRENT_LIST_DIR}/include/wifi
     ${CMAKE_CURRENT_LIST_DIR}/include/wired
+    ${CMAKE_CURRENT_LIST_DIR}/tuyaopen
     ${PLATFORM_PATH}/gd32_os/MSDK/rtos/rtos_wrapper
     ${PLATFORM_PATH}/gd32_os/ROM-EXPORT/bootloader
     ${PLATFORM_PATH}/gd32_os/ROM-EXPORT/halcomm
