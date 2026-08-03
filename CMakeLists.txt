@@ -46,6 +46,13 @@ if(ENABLE_TUYA_TRIM)
     # 记录：链接阶段在最终目标附加 --gc-sections
 endif()
 
+# Board-specific pin overrides.
+# GD32_MC_FOC_VWS_VW553 wires USART0 RX to PA15/AF7 instead of the default
+# PA1/AF0; see gd32_os/MSDK/plf/src/uart/uart.h.
+if(PLATFORM_BOARD STREQUAL "GD32_MC_FOC_VWS_VW553")
+    add_compile_definitions(CONFIG_USART0_RX_ON_PA15)
+endif()
+
 # # Add an option to enable AddressSanitizer (ASan)
 # option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 

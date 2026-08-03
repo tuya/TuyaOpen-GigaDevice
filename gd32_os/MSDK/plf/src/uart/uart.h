@@ -64,7 +64,16 @@ extern "C" {
 #define USART0_RX_AF_NUM                GPIO_AF_0
 #endif /* PLATFORM_BOARD_32VW55X_F527 */
 
-#if TOS_PROJECT_BOARD == GD32_MC_FOC_VWS_VW553
+/* Route USART0 RX to PA15/AF7 instead of the default PA1/AF0.
+ * Defined by the platform build for boards wired that way
+ * (GD32_MC_FOC_VWS_VW553); see platform CMakeLists.txt.
+ *
+ * Was `#if TOS_PROJECT_BOARD == GD32_MC_FOC_VWS_VW553`. Neither identifier is
+ * a preprocessor macro (TOS_PROJECT_BOARD is a CMake variable, never passed to
+ * the compiler), so per C99 6.10.1p4 both were replaced by 0 and the condition
+ * was always true: the override fired on every board, leaving TX on PA0 while
+ * RX moved to PA15. */
+#ifdef CONFIG_USART0_RX_ON_PA15
 #undef USART0_RX_GPIO
 #undef USART0_RX_PIN
 #undef USART0_RX_AF_NUM
