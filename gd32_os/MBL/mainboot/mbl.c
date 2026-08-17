@@ -42,11 +42,17 @@ OF SUCH DAMAGE.
 
 // #define CONFIG_BYPASS_MBL
 #define CONFIG_XMODEM
+/* LOG_UART comes from the build system (CONFIG_GD32_LOG_UART_PORT in boards/GD32/Kconfig),
+ * so the boot loader logs on the same port as the application. Without this guard the
+ * define below overrides the injected one and the two end up on different pins.
+ * MBL is a real compile target - gd32_os/MBL/mainboot/CMakeFiles/MBL.dir/mbl.o. */
+#ifndef LOG_UART
 #if CONFIG_BOARD == PLATFORM_BOARD_32VW55X_EVAL
 #define LOG_UART        UART1
 #else
 #define LOG_UART        UART2
 #endif
+#endif /* LOG_UART */
 
 #ifdef CONFIG_XMODEM
 extern void xmodem_start(uint32_t timeout);

@@ -18,6 +18,8 @@
 #include "gd32vw55x_dma.h"
 #include "wrapper_os.h"
 #include "dbg_print.h"
+#include "gd32_peri_busy.h"
+#include <stdatomic.h>
 // --- END: user defines and implements ---
 
 #define SPI_DEV_NUM             1
@@ -50,6 +52,26 @@ static BOOL_T spi_irq_en = FALSE;
 static TUYA_SPI_IRQ_CB spi_irq_cb = NULL;
 static uint8_t s_spi_tx_dummy = 0x00;  /* dummy TX byte used when send_buf is NULL    */
 static uint8_t s_spi_rx_discard;       /* discard RX byte used when receive_buf is NULL */
+
+/* Stop mode stops the bus clocks, and with irqs enabled the transfer calls hand back while dma
+ * is still running - the caller then blocks, idle sleeps, and the transfer is cut in half. Vote
+ * against sleep for as long as one is in flight; the exchange makes hold/release idempotent so
+ * the isr and the polling teardown can both call release. */
+static atomic_int spi_vote = ATOMIC_VAR_INIT(0);
+
+static void spi_busy_hold(void)
+{
+    if (atomic_exchange(&spi_vote, 1) == 0) {
+        gd32_peri_busy_inc();
+    }
+}
+
+static void spi_busy_release(void)
+{
+    if (atomic_exchange(&spi_vote, 0) == 1) {
+        gd32_peri_busy_dec();
+    }
+}
 
 static void tkl_spi_disable_irqs()
 {
@@ -172,6 +194,7 @@ void DMA_Channel4_IRQHandler(void)
         tkl_spi_disable_irqs();
 
         spi_disable();
+        spi_busy_release();
     }
 
     if (spi_env_info.send_buf != NULL) {
@@ -221,6 +244,7 @@ void DMA_Channel0_IRQHandler(void)
         tkl_spi_disable_irqs();
 
         spi_disable();
+        spi_busy_release();
     }
 
     if (spi_env_info.receive_buf != NULL) {
@@ -273,6 +297,7 @@ void SPI_IRQHandler(void)
         tkl_spi_disable_irqs();
 
         spi_disable();
+        spi_busy_release();
     }
 }
 
@@ -463,6 +488,7 @@ OPERATE_RET tkl_spi_deinit(TUYA_SPI_NUM_E port)
         spi_dma_disable(SPI_DMA_RECEIVE);
         spi_disable();
         spi_env_info.op_msk = 0;
+        spi_busy_release();
     }
 
     spi_deinit();
@@ -531,6 +557,7 @@ OPERATE_RET tkl_spi_send(TUYA_SPI_NUM_E port, void *data, uint32_t size)
     }
 
     spi_env_info.op_msk = SPI_SEND_OP_MSK;
+    spi_busy_hold();
     tkl_spi_tx_dma_conf(data, size, DMA_MEMORY_INCREASE_ENABLE);
     spi_dma_enable(SPI_DMA_TRANSMIT);
 
@@ -567,6 +594,7 @@ OPERATE_RET tkl_spi_send(TUYA_SPI_NUM_E port, void *data, uint32_t size)
     }
 
     spi_env_info.op_msk = 0;
+    spi_busy_release();
     tkl_spi_disable_irqs();
 
     spi_dma_disable(SPI_DMA_TRANSMIT);
@@ -624,6 +652,7 @@ OPERATE_RET tkl_spi_recv(TUYA_SPI_NUM_E port, void *data, uint32_t size)
     }
 
     spi_env_info.op_msk = SPI_RECV_OP_MSK;
+    spi_busy_hold();
     tkl_spi_rx_dma_conf(data, size, DMA_MEMORY_INCREASE_ENABLE);
     spi_dma_enable(SPI_DMA_RECEIVE);
 
@@ -660,6 +689,7 @@ OPERATE_RET tkl_spi_recv(TUYA_SPI_NUM_E port, void *data, uint32_t size)
     }
 
     spi_env_info.op_msk = 0;
+    spi_busy_release();
     spi_dma_disable(SPI_DMA_RECEIVE);
     dma_channel_disable(SPI_DMA_RX);
     tkl_spi_disable_irqs();
@@ -715,6 +745,7 @@ OPERATE_RET tkl_spi_transfer(TUYA_SPI_NUM_E port, void *send_buf, void *receive_
     }
 
     spi_env_info.op_msk = SPI_TRANS_SEND_OP_MSK | SPI_TRANS_RECV_OP_MSK;
+    spi_busy_hold();
     tkl_spi_rx_dma_conf(rx_buf, length, rx_mem_inc);
     tkl_spi_tx_dma_conf(tx_buf, length, tx_mem_inc);
 
@@ -759,6 +790,7 @@ OPERATE_RET tkl_spi_transfer(TUYA_SPI_NUM_E port, void *send_buf, void *receive_
     }
 
     spi_env_info.op_msk = 0;
+    spi_busy_release();
     spi_dma_disable(SPI_DMA_TRANSMIT);
     spi_dma_disable(SPI_DMA_RECEIVE);
     tkl_spi_disable_irqs();
@@ -783,6 +815,35 @@ OPERATE_RET tkl_spi_transfer_with_length(TUYA_SPI_NUM_E port, void *send_buf, ui
                                          uint32_t receive_len)
 {
     // --- BEGIN: user implements ---
+    if (port >= SPI_DEV_NUM) {
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    if (send_len == 0 && receive_len == 0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    /* Each direction gets a single DMA descriptor here, and in master mode it is the
+     * transmit side that generates the clock. That covers three shapes directly:
+     * write-only, read-only (dummy bytes clocked out) and symmetric full duplex.
+     *
+     * A transfer where both lengths are non-zero *and* different would need the DMA
+     * descriptor swapped half way through the same chip-select assertion, which this
+     * controller cannot do without splitting the transaction. Rejecting it is better
+     * than issuing two chip-select pulses the peripheral does not expect, or than
+     * arming a receive that never completes because the clock stops early. */
+    if (receive_len == 0) {
+        return tkl_spi_transfer(port, send_buf, NULL, send_len);
+    }
+
+    if (send_len == 0) {
+        return tkl_spi_transfer(port, NULL, receive_buf, receive_len);
+    }
+
+    if (send_len == receive_len) {
+        return tkl_spi_transfer(port, send_buf, receive_buf, send_len);
+    }
+
     return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }
@@ -815,6 +876,7 @@ OPERATE_RET tkl_spi_abort_transfer(TUYA_SPI_NUM_E port)
         spi_dma_disable(SPI_DMA_TRANSMIT);
         spi_dma_disable(SPI_DMA_RECEIVE);
         spi_disable();
+        spi_busy_release();
 
         spi_deinit();
         /* wait for SPI stability */
@@ -961,6 +1023,9 @@ int32_t tkl_spi_get_data_count(TUYA_SPI_NUM_E port)
 OPERATE_RET tkl_spi_ioctl(TUYA_SPI_NUM_E port, uint32_t cmd, void *args)
 {
     // --- BEGIN: user implements ---
+    /* Unlike uart, the common type header defines no SPI ioctl command set, so there
+     * is no portable contract to honour here. Add cases once one exists rather than
+     * inventing chip specific command numbers callers could not rely on. */
     return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }
@@ -976,6 +1041,7 @@ OPERATE_RET tkl_spi_ioctl(TUYA_SPI_NUM_E port, uint32_t cmd, void *args)
 uint32_t  tkl_spi_get_max_dma_data_length(void)
 {
     // --- BEGIN: user implements ---
-    return 0;
+    /* DMA_CHXCNT holds the transfer counter in bits 0..15 */
+    return 0xFFFFU;
     // --- END: user implements ---
 }

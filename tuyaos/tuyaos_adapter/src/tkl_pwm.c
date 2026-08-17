@@ -17,9 +17,16 @@
 #include "wrapper_os.h"
 #include "tkl_pwm.h"
 #include "tuya_error_code.h"
+#include "gd32_peri_busy.h"
+#include <stdatomic.h>
 // --- END: user defines and implements ---
 
 extern uint32_t SystemCoreClock; // default 160000000
+
+/* TUYA_PWM_NUM_MAX comes from the common type header and covers every platform, so it
+ * is much larger than the number of PWM channels wired up here. Bound all API checks
+ * and tables with the real channel count instead. */
+#define GD32_PWM_NUM    3
 
 typedef struct pwm_pin_map {
     uint32_t gpio_group;
@@ -34,7 +41,7 @@ typedef struct pwm_dev_config {
     TUYA_PWM_BASE_CFG_T cfg;
 } pwm_dev_config_t;
 
-static pwm_dev_config_t pwm_dev[TUYA_PWM_NUM_MAX] = {
+static pwm_dev_config_t pwm_dev[GD32_PWM_NUM] = {
     {TIMER0,  TIMER_CH_0, { GPIOA, GPIO_PIN_8,  GPIO_AF_1 }, {0}}, // TIMER0 ch0
     // TIMER1 & TIMER2 used as normal timer
     // {TIMER1,  TIMER_CH_0, { GPIOB, GPIO_PIN_4,  GPIO_AF_1 }, {0}}, // TIMER1 CH0
@@ -43,9 +50,86 @@ static pwm_dev_config_t pwm_dev[TUYA_PWM_NUM_MAX] = {
     {TIMER16, TIMER_CH_0, { GPIOA, GPIO_PIN_10, GPIO_AF_7 }, {0}}, // TIMER16 ch0, has only one channel
 };
 
+/* A running pwm is a timer counting off an apb clock, and stop mode takes that clock away -
+ * the output would simply freeze at whichever level the pin happened to be on, silently. Hold
+ * idle to shallow sleep for as long as a channel is driving. Per channel and idempotent,
+ * because duty_set() and polarity_set() re-enable a timer that is already running. */
+static atomic_int pwm_vote[GD32_PWM_NUM];
+
+static void pwm_clock_hold(TUYA_PWM_NUM_E ch_id)
+{
+    if (atomic_exchange(&pwm_vote[ch_id], 1) == 0) {
+        gd32_peri_busy_inc();
+    }
+}
+
+static void pwm_clock_release(TUYA_PWM_NUM_E ch_id)
+{
+    if (atomic_exchange(&pwm_vote[ch_id], 0) == 1) {
+        gd32_peri_busy_dec();
+    }
+}
+
+/* duty is out of 10000 when the caller leaves cfg->cycle at 0 - the range the common
+ * header documents and the other platform adapters use */
+#define PWM_DUTY_FULL_SCALE     10000U
+
+/* Timer counter resolution: the auto-reload register is 16 bit. */
+#define PWM_PERIOD_TICKS_MAX    0x10000U
+
+/**
+ * @brief split a PWM frequency into prescaler and period ticks
+ *
+ * @param[in] frequency: wanted PWM output frequency in Hz
+ * @param[out] psc: prescaler value to load (already the "+1" divisor, not the register)
+ *
+ * @return period in timer ticks, 0 if the frequency cannot be produced
+ */
+static uint32_t pwm_period_ticks(uint32_t frequency, uint32_t *psc)
+{
+    uint32_t div, ticks;
+
+    if (frequency == 0 || frequency > SystemCoreClock) {
+        return 0;
+    }
+
+    /* smallest prescaler that still keeps the period inside 16 bits */
+    div = (SystemCoreClock / frequency) / PWM_PERIOD_TICKS_MAX + 1U;
+    if (div > PWM_PERIOD_TICKS_MAX) {
+        return 0;
+    }
+
+    ticks = SystemCoreClock / div / frequency;
+    if (ticks == 0) {
+        return 0;
+    }
+
+    *psc = div;
+
+    return ticks;
+}
+
+/**
+ * @brief convert the configured duty ratio into compare ticks
+ */
+static uint32_t pwm_pulse_ticks(const TUYA_PWM_BASE_CFG_T *cfg, uint32_t period_ticks)
+{
+    uint32_t num = cfg->duty;
+    uint32_t den = (cfg->cycle != 0) ? cfg->cycle : PWM_DUTY_FULL_SCALE;
+
+    if (den == 0) {
+        return 0;
+    }
+    if (num > den) {
+        num = den;
+    }
+
+    return (uint32_t)(((uint64_t)period_ticks * num) / den);
+}
+
 static void pwm_gpio_config(TUYA_PWM_NUM_E ch_id)
 {
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return;
 
     pwm_pin_map_t *pin_info_t = &pwm_dev[ch_id].pin_info;
@@ -61,7 +145,7 @@ static void pwm_dev_rcu_enable(TUYA_PWM_NUM_E ch_id)
 {
     pwm_dev_config_t *pwm_device = NULL;
 
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return;
 
     pwm_device = &pwm_dev[ch_id];
@@ -115,13 +199,27 @@ static void pwm_dev_rcu_enable(TUYA_PWM_NUM_E ch_id)
 OPERATE_RET tkl_pwm_init(TUYA_PWM_NUM_E ch_id, const TUYA_PWM_BASE_CFG_T *cfg)
 {
     // --- BEGIN: user implements ---
-    if ((ch_id >= TUYA_PWM_NUM_MAX) || !cfg)
+    if ((ch_id >= GD32_PWM_NUM) || !cfg)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
-    /* frequency, cycle and duty check */
-    if ((cfg->frequency < 2500) || (cfg->frequency  > SystemCoreClock) \
-        || (cfg->cycle > 0xFFFF) || (cfg->duty > 0xFFFF))
+    /* frequency and duty ratio check. The old lower bound of 2500 Hz came from the
+     * previous math, which spent the whole prescaler on the frequency; picking the
+     * prescaler and period together reaches far lower frequencies. */
+    {
+        uint32_t psc = 1;
+
+        if (pwm_period_ticks(cfg->frequency, &psc) == 0) {
+            return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
+        }
+    }
+
+    if (cfg->cycle != 0) {
+        if (cfg->duty > cfg->cycle) {
+            return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
+        }
+    } else if (cfg->duty > PWM_DUTY_FULL_SCALE) {
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
+    }
 
     sys_memcpy(&pwm_dev[ch_id].cfg, cfg, sizeof(TUYA_PWM_BASE_CFG_T));
 
@@ -139,10 +237,11 @@ OPERATE_RET tkl_pwm_init(TUYA_PWM_NUM_E ch_id, const TUYA_PWM_BASE_CFG_T *cfg)
 OPERATE_RET tkl_pwm_deinit(TUYA_PWM_NUM_E ch_id)
 {
     // --- BEGIN: user implements ---
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
     timer_deinit(pwm_dev[ch_id].timer);
+    pwm_clock_release(ch_id);
     sys_memset(&pwm_dev[ch_id].cfg, 0, sizeof(TUYA_PWM_BASE_CFG_T));
 
     return OPRT_OK;
@@ -163,8 +262,9 @@ OPERATE_RET tkl_pwm_start(TUYA_PWM_NUM_E ch_id)
     timer_oc_parameter_struct timer_ocintpara = {0};
     pwm_dev_config_t *pwm_config = NULL;
     TUYA_PWM_BASE_CFG_T *cfg = NULL;
+    uint32_t psc = 1, period_ticks = 0;
 
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
     cfg = &pwm_dev[ch_id].cfg;
@@ -176,13 +276,23 @@ OPERATE_RET tkl_pwm_start(TUYA_PWM_NUM_E ch_id)
 
     timer_deinit(pwm_config->timer);
 
-    /* TIMERx configuration */
-    timer_initpara.prescaler = (SystemCoreClock / cfg->frequency) - 1;
-    if (cfg->cycle == 0) {
-        timer_initpara.period = cfg->duty * 2 - 1;
-    } else {
-        timer_initpara.period = cfg->cycle - 1;
+    /* TIMERx configuration
+     *
+     * cfg->frequency is the PWM output frequency in Hz, and the duty ratio is
+     * duty/cycle (duty out of 10000 when cycle is left at 0). The timer counts at
+     * SystemCoreClock: both APB prescalers are /1, and RCU_TIMER_PSC_MUL2 then leaves
+     * the timer clock equal to CK_APBx.
+     *
+     * The previous code read cfg->frequency as the counter clock and derived the
+     * period from cfg->duty, so a 10 kHz request came out at 1 Hz and the duty ratio
+     * was pinned at 50% whatever the caller asked for. */
+    period_ticks = pwm_period_ticks(cfg->frequency, &psc);
+    if (period_ticks == 0) {
+        return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
     }
+
+    timer_initpara.prescaler = psc - 1;
+    timer_initpara.period    = period_ticks - 1;
 
     if (cfg->count_mode == TUYA_PWM_CNT_UP) {
         timer_initpara.alignedmode = TIMER_COUNTER_EDGE;
@@ -213,8 +323,10 @@ OPERATE_RET tkl_pwm_start(TUYA_PWM_NUM_E ch_id)
 
     timer_channel_output_config(pwm_config->timer, pwm_config->channel, &timer_ocintpara);
 
-    /* timer channel configuration in PWM mode0 */
-    timer_channel_output_pulse_value_config(pwm_config->timer, pwm_config->channel, cfg->duty - 1);
+    /* timer channel configuration in PWM mode0: the output is active while the counter
+     * is below the compare value, so 0 gives 0% and period_ticks gives 100% */
+    timer_channel_output_pulse_value_config(pwm_config->timer, pwm_config->channel,
+                                            pwm_pulse_ticks(cfg, period_ticks));
     timer_channel_output_mode_config(pwm_config->timer, pwm_config->channel, TIMER_OC_MODE_PWM0);
     timer_channel_output_shadow_config(pwm_config->timer, pwm_config->channel, TIMER_OC_SHADOW_DISABLE);
 
@@ -224,6 +336,7 @@ OPERATE_RET tkl_pwm_start(TUYA_PWM_NUM_E ch_id)
     /* auto-reload preload enable */
     timer_auto_reload_shadow_enable(pwm_config->timer);
     timer_enable(pwm_config->timer);
+    pwm_clock_hold(ch_id);
 
     return OPRT_OK;
     // --- END: user implements ---
@@ -239,11 +352,12 @@ OPERATE_RET tkl_pwm_start(TUYA_PWM_NUM_E ch_id)
 OPERATE_RET tkl_pwm_stop(TUYA_PWM_NUM_E ch_id)
 {
     // --- BEGIN: user implements ---
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
     timer_auto_reload_shadow_disable(pwm_dev[ch_id].timer);
     timer_disable(pwm_dev[ch_id].timer);
+    pwm_clock_release(ch_id);
 
     return OPRT_OK;
     // --- END: user implements ---
@@ -304,10 +418,11 @@ OPERATE_RET tkl_pwm_duty_set(TUYA_PWM_NUM_E ch_id, uint32_t duty)
     // --- BEGIN: user implements ---
     pwm_dev_config_t *pwm_config = NULL;
 
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
-    if (duty > 0xFFFF)
+    /* duty is a ratio against cfg.cycle, or out of 10000 when cycle is unset */
+    if (duty > ((pwm_dev[ch_id].cfg.cycle != 0) ? pwm_dev[ch_id].cfg.cycle : PWM_DUTY_FULL_SCALE))
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
     /* stop first */
@@ -323,6 +438,7 @@ OPERATE_RET tkl_pwm_duty_set(TUYA_PWM_NUM_E ch_id, uint32_t duty)
 
     timer_auto_reload_shadow_enable(pwm_config->timer);
     timer_enable(pwm_config->timer);
+    pwm_clock_hold(ch_id);
 #endif
     return OPRT_OK;
     // --- END: user implements ---
@@ -339,11 +455,16 @@ OPERATE_RET tkl_pwm_duty_set(TUYA_PWM_NUM_E ch_id, uint32_t duty)
 OPERATE_RET tkl_pwm_frequency_set(TUYA_PWM_NUM_E ch_id, uint32_t frequency)
 {
     // --- BEGIN: user implements ---
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
-     if ((frequency < 2500) || (frequency  > SystemCoreClock))
-        return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
+    {
+        uint32_t psc = 1;
+
+        if (pwm_period_ticks(frequency, &psc) == 0) {
+            return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
+        }
+    }
 
     /* stop first */
     tkl_pwm_stop(ch_id);
@@ -368,7 +489,7 @@ OPERATE_RET tkl_pwm_polarity_set(TUYA_PWM_NUM_E ch_id, TUYA_PWM_POLARITY_E polar
     pwm_dev_config_t *pwm_config = NULL;
     timer_oc_parameter_struct timer_ocintpara = {0};
 
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
     /* stop first */
@@ -397,6 +518,7 @@ OPERATE_RET tkl_pwm_polarity_set(TUYA_PWM_NUM_E ch_id, TUYA_PWM_POLARITY_E polar
 
     timer_auto_reload_shadow_enable(pwm_config->timer);
     timer_enable(pwm_config->timer);
+    pwm_clock_hold(ch_id);
 #endif
     return OPRT_OK;
     // --- END: user implements ---
@@ -428,7 +550,7 @@ OPERATE_RET tkl_pwm_info_set(TUYA_PWM_NUM_E ch_id, const TUYA_PWM_BASE_CFG_T *in
 OPERATE_RET tkl_pwm_info_get(TUYA_PWM_NUM_E ch_id, TUYA_PWM_BASE_CFG_T *info)
 {
     // --- BEGIN: user implements ---
-    if ((ch_id >= TUYA_PWM_NUM_MAX) || !info)
+    if ((ch_id >= GD32_PWM_NUM) || !info)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
     sys_memcpy(info, &pwm_dev[ch_id].cfg, sizeof(TUYA_PWM_BASE_CFG_T));
@@ -445,13 +567,13 @@ typedef struct pwm_cap_irq {
     TUYA_PWM_CAPTURE_MODE_E cap_mode;
 } pwm_cap_irq_t;
 
-static pwm_cap_irq_t pwm_cap_irqs[TUYA_PWM_NUM_MAX] = {0};
+static pwm_cap_irq_t pwm_cap_irqs[GD32_PWM_NUM] = {0};
 
 static TUYA_PWM_NUM_E timer_to_ch_id (uint32_t timer)
 {
     uint8_t i = 0;
 
-    for (i = 0; i < TUYA_PWM_NUM_MAX; i++) {
+    for (i = 0; i < GD32_PWM_NUM; i++) {
         if (pwm_dev[i].timer == timer)
             break;
     }
@@ -465,7 +587,7 @@ void pwm_cap_irq_hdl(uint32_t timer)
     pwm_cap_irq_t *irq;
     TUYA_PWM_CAPTURE_DATA_T data = {0};
 
-    if (ch_id != TUYA_PWM_NUM_MAX) {
+    if (ch_id != GD32_PWM_NUM) {
         /* read channel 0 capture value */
         irq = &pwm_cap_irqs[ch_id];
 
@@ -524,7 +646,7 @@ OPERATE_RET tkl_pwm_cap_start(TUYA_PWM_NUM_E ch_id, const TUYA_PWM_CAP_IRQ_T *cf
     timer_parameter_struct timer_initpara = {0};
     pwm_dev_config_t *pwm_device = NULL;
 
-    if (ch_id >= TUYA_PWM_NUM_MAX || cfg == NULL || cfg->cb == NULL)
+    if (ch_id >= GD32_PWM_NUM || cfg == NULL || cfg->cb == NULL)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
     /* register irqs */
@@ -588,6 +710,7 @@ OPERATE_RET tkl_pwm_cap_start(TUYA_PWM_NUM_E ch_id, const TUYA_PWM_CAP_IRQ_T *cf
 
     /* TIMER counter enable */
     timer_enable(pwm_device->timer);
+    pwm_clock_hold(ch_id);
 
     return OPRT_OK;
     // --- END: user implements ---
@@ -603,12 +726,13 @@ OPERATE_RET tkl_pwm_cap_start(TUYA_PWM_NUM_E ch_id, const TUYA_PWM_CAP_IRQ_T *cf
 OPERATE_RET tkl_pwm_cap_stop(TUYA_PWM_NUM_E ch_id)
 {
     // --- BEGIN: user implements ---
-    if (ch_id >= TUYA_PWM_NUM_MAX)
+    if (ch_id >= GD32_PWM_NUM)
         return OPRT_OS_ADAPTER_PWM_INVALID_PARM;
 
     timer_auto_reload_shadow_disable(pwm_dev[ch_id].timer);
     timer_interrupt_disable(pwm_dev[ch_id].timer, TIMER_INT_CH0);
     timer_disable(pwm_dev[ch_id].timer);
+    pwm_clock_release(ch_id);
 
     return OPRT_OK;
     // --- END: user implements ---

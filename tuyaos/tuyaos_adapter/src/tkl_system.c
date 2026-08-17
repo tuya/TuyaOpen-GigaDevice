@@ -90,7 +90,44 @@ int tkl_system_get_random(uint32_t range)
 TUYA_RESET_REASON_E tkl_system_get_reset_reason(char **describe)
 {
     // --- BEGIN: user implements ---
-    return 0;
+    /* The RCU reset flags stay set until software clears them, so latch them on the
+     * first call and clear the hardware afterwards - otherwise a later reset would be
+     * reported together with every earlier one. */
+    static TUYA_RESET_REASON_E reason = TUYA_RESET_REASON_UNKNOWN;
+    static const char *reason_str = "unknown";
+    static uint8_t latched = 0;
+
+    if (!latched) {
+        /* most specific cause first: a power-on also raises the pin reset flag */
+        if (SET == rcu_flag_get(RCU_FLAG_FWDGTRST)) {
+            reason = TUYA_RESET_REASON_HW_WDOG;
+            reason_str = "free watchdog";
+        } else if (SET == rcu_flag_get(RCU_FLAG_WWDGTRST)) {
+            reason = TUYA_RESET_REASON_SW_WDOG;
+            reason_str = "window watchdog";
+        } else if (SET == rcu_flag_get(RCU_FLAG_SWRST)) {
+            reason = TUYA_RESET_REASON_SOFTWARE;
+            reason_str = "software";
+        } else if (SET == rcu_flag_get(RCU_FLAG_LPRST)) {
+            reason = TUYA_RESET_REASON_DEEPSLEEP;
+            reason_str = "low power";
+        } else if (SET == rcu_flag_get(RCU_FLAG_PORRST)) {
+            reason = TUYA_RESET_REASON_POWERON;
+            reason_str = "power on";
+        } else if (SET == rcu_flag_get(RCU_FLAG_EPRST)) {
+            reason = TUYA_RESET_REASON_EXTERNAL;
+            reason_str = "external pin";
+        }
+
+        rcu_all_reset_flag_clear();
+        latched = 1;
+    }
+
+    if (describe) {
+        *describe = (char *)reason_str;
+    }
+
+    return reason;
     // --- END: user implements ---
 }
 
@@ -139,7 +176,32 @@ void tkl_system_delay(uint32_t num_ms)
 OPERATE_RET tkl_system_get_cpu_info(TUYA_CPU_INFO_T **cpu_ary, int *cpu_cnt)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    /* GD32VW553 is single core; the caller only reads the array, so a static one
+     * avoids making it responsible for freeing anything. */
+    static TUYA_CPU_INFO_T cpu_info;
+    uint32_t stats_ms = 0, sleep_ms = 0;
+
+    if (cpu_ary == NULL || cpu_cnt == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    sys_cpu_sleep_time_get(&stats_ms, &sleep_ms);
+
+    if (stats_ms > 0 && stats_ms >= sleep_ms) {
+        cpu_info.use_ratio = ((stats_ms - sleep_ms) * 100U) / stats_ms;
+    } else {
+        cpu_info.use_ratio = 0;
+    }
+
+    /* the SDK exposes no accessor for a chip unique id, so report an empty one rather
+     * than reading a guessed register address */
+    cpu_info.chipidlen = 0;
+    cpu_info.chipid[0] = '\0';
+
+    *cpu_ary = &cpu_info;
+    *cpu_cnt = 1;
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 

@@ -54,15 +54,21 @@ extern "C" {
 #endif          // CONFIG_PLATFORM_ASIC end
 #endif /* CFG_GD_TRACE_EXT */
 
+/* LOG_UART may be supplied by the build system (see CONFIG_GD32_LOG_UART_PORT in
+ * boards/GD32/Kconfig). Every definition below is a fallback for when it is not, so a
+ * board never has to be added to the #if chains in this file. */
+
 // UART port
 #ifdef CFG_BLE_HCI_MODE
 #ifdef CONFIG_PLATFORM_ASIC
 #ifndef CFG_GD_TRACE_EXT
+#ifndef LOG_UART
 #if defined(CONFIG_BOARD) && (CONFIG_BOARD == PLATFORM_BOARD_32VW55X_EVAL || CONFIG_BOARD == PLATFORM_BOARD_32VW55X_SONIC)
 #define LOG_UART                UART1
 #else
 #define LOG_UART                UART2
 #endif /* CONFIG_BOARD */
+#endif /* LOG_UART */
 #endif
 #define HCI_UART                USART0
 #else
@@ -71,15 +77,19 @@ extern "C" {
 #define HCI_DMA_CHNL            DMA_CH5
 #define HCI_DMA_IRQ_NUM         DMA_Channel5_IRQn
 #endif  // HCI_UART_RX_DMA
+#ifndef LOG_UART
 #define LOG_UART                UART1
+#endif
 #define HCI_UART                UART2
 #endif          // CONFIG_PLATFORM_ASIC end
 #else /* CFG_BLE_HCI_MODE */
+#ifndef LOG_UART
 #if defined(CONFIG_BOARD) && (CONFIG_BOARD == PLATFORM_BOARD_32VW55X_EVAL || CONFIG_BOARD == PLATFORM_BOARD_32VW55X_SONIC)
 #define LOG_UART                UART1
 #else
 #define LOG_UART                UART2
 #endif /* CONFIG_BOARD */
+#endif /* LOG_UART */
 #endif /* CFG_BLE_HCI_MODE */
 
 #ifdef TRACE_UART

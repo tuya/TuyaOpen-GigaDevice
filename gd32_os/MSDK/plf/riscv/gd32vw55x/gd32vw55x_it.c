@@ -248,7 +248,13 @@ void EXTI5_9_IRQHandler(void)
 
     deep_sleep_exit();
 
-#ifdef LOG_UART
+#if defined(LOG_UART) && !defined(TUYAOS_SUPPORT)
+    /* This block belongs to the SDK's own console demo: the matching
+     * sys_wakelock_release(LOCK_ID_USART) lives in cmd_shell.c / atcmd.c, once a command
+     * has been read back. TuyaOS builds neither of those, so under TUYAOS_SUPPORT the
+     * lock would be taken here and never given back, permanently blocking every sleep
+     * path for the rest of the run - and a blocking dbg_print from irq context on top.
+     * EXTI lines 5..9 are ordinary application pins here, not a console wakeup. */
     dbg_print(NOTICE, "WAKEUP For Console, Input Any Command or Press 'Enter' Key to Deep Sleep\r\n#\r\n");
     usart_command_enable(LOG_UART,USART_CMD_RXFCMD);
     sys_wakelock_acquire(LOCK_ID_USART);

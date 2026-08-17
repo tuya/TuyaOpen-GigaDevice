@@ -63,7 +63,17 @@ OF SUCH DAMAGE.
 #endif
 
 #define RTC_WAKEUP_EXTI_LINE                EXTI_21
+
+/* deep_sleep_enter() arms this line so a keypress on the console can wake the chip, which
+ * only works if it is the line the log uart's own rx pin sits on. EXTI_7 is PA7, the rx of
+ * UART2; a board logging on USART0 (rx PA1) or UART1 (rx PA8) needs 1 or 8 instead, and
+ * arming the wrong line both loses console wakeup and leaves whatever really is on PA7 -
+ * often nothing, floating - able to drag the chip out of deep sleep at will.
+ * platform/GD32/CMakeLists.txt derives it from CONFIG_GD32_LOG_UART_PORT alongside
+ * LOG_UART; this stays as the fallback for builds that inject neither. */
+#ifndef LOG_USART_RX_PIN_EXTI_LINE
 #define LOG_USART_RX_PIN_EXTI_LINE          EXTI_7
+#endif
 #define BLE_WAKEUP_EXTI_LINE                EXTI_24
 
 struct time_rtc {

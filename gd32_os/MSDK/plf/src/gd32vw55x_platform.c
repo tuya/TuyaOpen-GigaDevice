@@ -164,7 +164,20 @@ static void exti_line_clear(exti_line_enum line_no)
 */
 void deep_sleep_enter(uint16_t sleep_time)
 {
+#ifdef GD32_CONSOLE_WAKEUP
+    /* Off by default. This wakes the chip on any rising edge of the log uart's rx pin, so the
+     * sdk's own console demo can be typed at while the board is asleep. The half that made that
+     * useful - taking LOCK_ID_USART in EXTI5_9_IRQHandler and dropping it once cmd_shell.c has
+     * read a command - is not built here, so all it would leave behind is a pin that costs a
+     * wakeup every time it glitches, and on a product that log pin may not even be connected.
+     *
+     * An application that wants to be woken by a uart says so through tkl_uart, which arms the
+     * rx pin as an exti *event* on the falling edge of a start bit: no isr, no lock, and it
+     * catches the character rather than a bit boundary partway into it.
+     *
+     * Define GD32_CONSOLE_WAKEUP to get the old behaviour back while debugging. */
     exti_init(LOG_USART_RX_PIN_EXTI_LINE, EXTI_INTERRUPT, EXTI_TRIG_RISING);
+#endif
 
     // Wifi module enter exit by self
     // exti_init(WLAN_WAKEUP_EXTI_LINE, EXTI_INTERRUPT, EXTI_TRIG_RISING);

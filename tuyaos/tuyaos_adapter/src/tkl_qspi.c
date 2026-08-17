@@ -10,13 +10,201 @@
  */
 
 // --- BEGIN: user defines and implements ---
+#include "gd32vw55x.h"
+#include "gd32vw55x_qspi.h"
+#include "gd32vw55x_gpio.h"
+#include "gd32vw55x_rcu.h"
 #include "tkl_qspi.h"
 #include "tuya_error_code.h"
+
+extern uint32_t SystemCoreClock;
+
+/*
+ * GD32VW553 has a single QSPI controller, so only TUYA_QSPI_NUM_0 exists.
+ *
+ * Default pin group (GD32VW553-TY1 datasheet Rev0.5 Table 4-1, matching the
+ * PLATFORM_BOARD_32VW55X_EVAL branch of MSDK/plf/src/qspi_flash/qspi_flash_api.c):
+ *
+ *   PA4  QSPI_SCK   AF3
+ *   PA5  QSPI_CSN   AF3
+ *   PA6  QSPI_IO0   AF3
+ *   PA7  QSPI_IO1   AF3
+ *   PB3  QSPI_IO2   AF3
+ *   PB4  QSPI_IO3   AF3
+ *
+ * IO2/IO3 are claimed lazily - only once a 4-line (quad) phase is actually requested -
+ * so a board that stays in 1/2-line mode keeps PB3/PB4 free. Note that on the TY1
+ * module PA6/PA7 double as the default UART2 log/download port: a board routing QSPI
+ * here gives up that console.
+ *
+ * The chip also maps QSPI onto PA9(SCK)/PA10(CSN)/PA11(IO0)/PA12(IO1) at AF4 (the
+ * PLATFORM_BOARD_32VW55X_START branch). Those pins are not bonded out on the TY1
+ * module; define QSPI_PINGROUP_ALT=1 for a bare-die design that uses them.
+ */
+#ifndef QSPI_PINGROUP_ALT
+#define QSPI_PINGROUP_ALT       0
+#endif
+
+#if QSPI_PINGROUP_ALT
+#define QSPI_BASE_GPIO          GPIOA
+#define QSPI_BASE_AF            GPIO_AF_4
+#define QSPI_BASE_PINS          (GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11 | GPIO_PIN_12)
+#else
+#define QSPI_BASE_GPIO          GPIOA
+#define QSPI_BASE_AF            GPIO_AF_3
+#define QSPI_BASE_PINS          (GPIO_PIN_4 | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7)
+#endif
+
+#define QSPI_QUAD_GPIO          GPIOB
+#define QSPI_QUAD_AF            GPIO_AF_3
+#define QSPI_QUAD_PINS          (GPIO_PIN_3 | GPIO_PIN_4)
+
+/* flash_size + 1 = number of address bits. This is a generic peripheral bus rather
+ * than a known flash, so allow the full 32-bit address space. */
+#define QSPI_ADDR_BITS_MAX      31
+
+#define QSPI_DUMMY_CYCLES_MAX   31
+
+typedef struct {
+    TUYA_QSPI_IRQ_CB        cb;
+    TUYA_QSPI_WIRE_MODE_E   data_lines;     /* default wire mode, from init */
+    uint8_t                 last_op;        /* TUYA_QSPI_OP_E of the transfer in flight */
+    uint8_t                 inited;
+    uint8_t                 quad_ready;     /* IO2/IO3 already switched to AF */
+} qspi_env_t;
+
+static qspi_env_t s_qspi_env = {0};
+
+static void qspi_base_pins_config(void)
+{
+    rcu_periph_clock_enable(RCU_GPIOA);
+    gpio_af_set(QSPI_BASE_GPIO, QSPI_BASE_AF, QSPI_BASE_PINS);
+    gpio_mode_set(QSPI_BASE_GPIO, GPIO_MODE_AF, GPIO_PUPD_NONE, QSPI_BASE_PINS);
+    gpio_output_options_set(QSPI_BASE_GPIO, GPIO_OTYPE_PP, GPIO_OSPEED_MAX, QSPI_BASE_PINS);
+}
+
+static void qspi_quad_pins_config(void)
+{
+    if (s_qspi_env.quad_ready) {
+        return;
+    }
+
+    rcu_periph_clock_enable(RCU_GPIOB);
+    gpio_af_set(QSPI_QUAD_GPIO, QSPI_QUAD_AF, QSPI_QUAD_PINS);
+    gpio_mode_set(QSPI_QUAD_GPIO, GPIO_MODE_AF, GPIO_PUPD_NONE, QSPI_QUAD_PINS);
+    gpio_output_options_set(QSPI_QUAD_GPIO, GPIO_OTYPE_PP, GPIO_OSPEED_MAX, QSPI_QUAD_PINS);
+
+    s_qspi_env.quad_ready = 1;
+}
+
+static void qspi_pins_release(void)
+{
+    gpio_mode_set(QSPI_BASE_GPIO, GPIO_MODE_INPUT, GPIO_PUPD_NONE, QSPI_BASE_PINS);
+
+    if (s_qspi_env.quad_ready) {
+        gpio_mode_set(QSPI_QUAD_GPIO, GPIO_MODE_INPUT, GPIO_PUPD_NONE, QSPI_QUAD_PINS);
+        s_qspi_env.quad_ready = 0;
+    }
+}
+
+static int wire_mode_to_instruction(TUYA_QSPI_WIRE_MODE_E lines, uint32_t *out)
+{
+    switch (lines) {
+    case TUYA_QSPI_1WIRE: *out = QSPI_INSTRUCTION_1_LINE;  return 0;
+    case TUYA_QSPI_2WIRE: *out = QSPI_INSTRUCTION_2_LINES; return 0;
+    case TUYA_QSPI_4WIRE: *out = QSPI_INSTRUCTION_4_LINES; return 0;
+    default:                                               return -1;
+    }
+}
+
+static int wire_mode_to_addr(TUYA_QSPI_WIRE_MODE_E lines, uint32_t *out)
+{
+    switch (lines) {
+    case TUYA_QSPI_1WIRE: *out = QSPI_ADDR_1_LINE;  return 0;
+    case TUYA_QSPI_2WIRE: *out = QSPI_ADDR_2_LINES; return 0;
+    case TUYA_QSPI_4WIRE: *out = QSPI_ADDR_4_LINES; return 0;
+    default:                                        return -1;
+    }
+}
+
+static int wire_mode_to_data(TUYA_QSPI_WIRE_MODE_E lines, uint32_t *out)
+{
+    switch (lines) {
+    case TUYA_QSPI_1WIRE: *out = QSPI_DATA_1_LINE;  return 0;
+    case TUYA_QSPI_2WIRE: *out = QSPI_DATA_2_LINES; return 0;
+    case TUYA_QSPI_4WIRE: *out = QSPI_DATA_4_LINES; return 0;
+    default:                                        return -1;
+    }
+}
+
+static int addr_size_to_reg(uint8_t bytes, uint32_t *out)
+{
+    switch (bytes) {
+    case 1: *out = QSPI_ADDR_8_BITS;  return 0;
+    case 2: *out = QSPI_ADDR_16_BITS; return 0;
+    case 3: *out = QSPI_ADDR_24_BITS; return 0;
+    case 4: *out = QSPI_ADDR_32_BITS; return 0;
+    default:                          return -1;
+    }
+}
+
+/* TUYA_QSPI_CMD_T carries addr[] in transmission order - index 0 is the byte that goes out
+ * first, which for a serial memory is the most significant address byte. That is what the
+ * T5AI adapter does too: qspi_pack_cmd_addr_le() lays cmd[] then addr[] into one array and
+ * feeds it to the hardware starting at index 0.
+ *
+ * The GD32 controller wants the address as a plain 32-bit value and shifts it out most
+ * significant byte first, so index 0 has to land in the top byte of whatever width was asked
+ * for. Packing it the other way round sends 0x123456 out as 56 34 12 - which a flash reads as
+ * a completely different address, with nothing to warn anyone. */
+static uint32_t addr_bytes_to_u32(const uint8_t *bytes, uint8_t size)
+{
+    uint32_t v = 0;
+    uint8_t i;
+
+    for (i = 0; i < size; i++) {
+        v = (v << 8) | bytes[i];
+    }
+
+    return v;
+}
+
+static void qspi_wait_not_busy(void)
+{
+    while (RESET != qspi_flag_get(QSPI_FLAG_BUSY)) {
+    }
+}
+
+static void qspi_wait_transfer_complete(void)
+{
+    while (RESET == qspi_flag_get(QSPI_FLAG_TC)) {
+    }
+    qspi_flag_clear(QSPI_FLAG_TC);
+}
+
+/* QSPI_IRQHandler is declared .weak in plf/riscv/env/start.S and already sits in the
+ * vector table, so defining it here needs no change to the SDK. */
+void QSPI_IRQHandler(void)
+{
+    if (RESET != qspi_interrupt_flag_get(QSPI_INT_FLAG_TC)) {
+        qspi_interrupt_flag_clear(QSPI_INT_FLAG_TC);
+
+        if (s_qspi_env.cb) {
+            s_qspi_env.cb(TUYA_QSPI_NUM_0,
+                          (s_qspi_env.last_op == TUYA_QSPI_WRITE) ? TUYA_QSPI_EVENT_TX
+                                                                  : TUYA_QSPI_EVENT_RX);
+        }
+    }
+
+    if (RESET != qspi_interrupt_flag_get(QSPI_INT_FLAG_TERR)) {
+        qspi_interrupt_flag_clear(QSPI_INT_FLAG_TERR);
+    }
+}
 // --- END: user defines and implements ---
 
 /**
  * @brief qspi init
- * 
+ *
  * @param[in] port: qspi port
  * @param[in] cfg:  QSPI parameter settings
  *
@@ -25,13 +213,65 @@
 OPERATE_RET tkl_qspi_init(TUYA_QSPI_NUM_E port, const TUYA_QSPI_BASE_CFG_T *cfg)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    qspi_init_struct init_para;
+    uint32_t prescaler;
+
+    if (port != TUYA_QSPI_NUM_0 || cfg == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    /* the GD32VW553 QSPI block is master only */
+    if (cfg->role != TUYA_QSPI_ROLE_MASTER) {
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    /* the controller only implements CPOL/CPHA 0 and 3 */
+    if (cfg->mode != TUYA_QSPI_MODE0 && cfg->mode != TUYA_QSPI_MODE3) {
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    if (cfg->freq_hz == 0 || cfg->freq_hz > SystemCoreClock) {
+        return OPRT_INVALID_PARM;
+    }
+
+    /* cfg->use_dma is accepted but transfers run in polled mode - the QSPI DMA path is
+     * not wired up here, so a caller asking for DMA still gets correct (slower) data. */
+
+    rcu_periph_clock_enable(RCU_QSPI);
+
+    qspi_base_pins_config();
+    if (cfg->dma_data_lines == TUYA_QSPI_4WIRE) {
+        qspi_quad_pins_config();
+    }
+
+    /* QSPI clock = AHB clock / (prescaler + 1), rounded so the bus never runs fast */
+    prescaler = (SystemCoreClock + cfg->freq_hz - 1) / cfg->freq_hz;
+    prescaler = (prescaler > 0) ? (prescaler - 1) : 0;
+    if (prescaler > 255) {
+        prescaler = 255;
+    }
+
+    qspi_struct_para_init(&init_para);
+    init_para.prescaler      = prescaler;
+    init_para.fifo_threshold = 8;
+    init_para.sample_shift   = QSPI_SAMPLE_SHIFTING_HALFCYCLE;
+    init_para.flash_size     = QSPI_ADDR_BITS_MAX;
+    init_para.cs_high_time   = QSPI_CS_HIGH_TIME_8_CYCLE;
+    init_para.clock_mode     = (cfg->mode == TUYA_QSPI_MODE3) ? QSPI_CLOCK_MODE_3
+                                                              : QSPI_CLOCK_MODE_0;
+    qspi_init(&init_para);
+    qspi_enable();
+
+    s_qspi_env.data_lines = cfg->dma_data_lines;
+    s_qspi_env.inited     = 1;
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
 /**
  * @brief qspi deinit
- * 
+ *
  * @param[in] port: qspi port
  *
  * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
@@ -39,7 +279,26 @@ OPERATE_RET tkl_qspi_init(TUYA_QSPI_NUM_E port, const TUYA_QSPI_BASE_CFG_T *cfg)
 OPERATE_RET tkl_qspi_deinit(TUYA_QSPI_NUM_E port)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    if (port != TUYA_QSPI_NUM_0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (!s_qspi_env.inited) {
+        return OPRT_OK;
+    }
+
+    eclic_irq_disable(QSPI_IRQn);
+    qspi_interrupt_disable(QSPI_INT_TC | QSPI_INT_TERR);
+    qspi_disable();
+    qspi_deinit();
+
+    qspi_pins_release();
+    rcu_periph_clock_disable(RCU_QSPI);
+
+    s_qspi_env.cb     = NULL;
+    s_qspi_env.inited = 0;
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
@@ -55,13 +314,117 @@ OPERATE_RET tkl_qspi_deinit(TUYA_QSPI_NUM_E port)
 OPERATE_RET tkl_qspi_send(TUYA_QSPI_NUM_E port, void *data, uint16_t size)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    TUYA_QSPI_CMD_T cmd;
+    OPERATE_RET rt;
+    uint8_t *buf = (uint8_t *)data;
+
+    if (port != TUYA_QSPI_NUM_0 || data == NULL || size == 0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (!s_qspi_env.inited) {
+        return OPRT_COM_ERROR;
+    }
+
+    /* same framing the other platform adapters use: byte 0 is the command and the
+     * rest is payload, every phase on the wire mode chosen at init */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.op         = TUYA_QSPI_WRITE;
+    cmd.cmd[0]     = buf[0];
+    cmd.cmd_size   = 1;
+    cmd.cmd_lines  = s_qspi_env.data_lines;
+    cmd.addr_size  = 0;
+    cmd.addr_lines = s_qspi_env.data_lines;
+    cmd.data       = (size > 1) ? (buf + 1) : NULL;
+    cmd.data_size  = (uint32_t)size - 1;
+    cmd.data_lines = s_qspi_env.data_lines;
+
+    rt = tkl_qspi_comand(port, &cmd);
+    if (rt == OPRT_OK && s_qspi_env.cb) {
+        s_qspi_env.cb(port, TUYA_QSPI_EVENT_TX);
+    }
+
+    return rt;
+    // --- END: user implements ---
+}
+
+/**
+ * @brief send a single command byte, with no address and no data phase
+ *
+ * @param[in] port: qspi port
+ * @param[in] cmd:  command byte
+ *
+ * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
+ */
+OPERATE_RET tkl_qspi_send_cmd(TUYA_QSPI_NUM_E port, uint8_t cmd)
+{
+    // --- BEGIN: user implements ---
+    TUYA_QSPI_CMD_T command;
+
+    memset(&command, 0, sizeof(command));
+    command.op        = TUYA_QSPI_WRITE;
+    command.cmd[0]    = cmd;
+    command.cmd_size  = 1;
+    command.cmd_lines = s_qspi_env.data_lines;
+
+    return tkl_qspi_comand(port, &command);
+    // --- END: user implements ---
+}
+
+/**
+ * @brief send a data-only transfer in indirect mode (no instruction, no address)
+ *
+ * @param[in] port: qspi port
+ * @param[in] data: buffer to send
+ * @param[in] data_len: number of bytes
+ *
+ * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
+ */
+OPERATE_RET tkl_qspi_send_data_indirect_mode(TUYA_QSPI_NUM_E port, uint8_t *data, uint32_t data_len)
+{
+    // --- BEGIN: user implements ---
+    qspi_command_struct cmd;
+    uint32_t data_mode;
+
+    if (port != TUYA_QSPI_NUM_0 || data == NULL || data_len == 0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (!s_qspi_env.inited) {
+        return OPRT_COM_ERROR;
+    }
+
+    if (wire_mode_to_data(s_qspi_env.data_lines, &data_mode)) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (s_qspi_env.data_lines == TUYA_QSPI_4WIRE) {
+        qspi_quad_pins_config();
+    }
+
+    qspi_cmd_struct_para_init(&cmd);
+    cmd.instruction_mode = QSPI_INSTRUCTION_NONE;
+    cmd.addr_mode        = QSPI_ADDR_NONE;
+    cmd.altebytes_mode   = QSPI_ALTE_BYTES_NONE;
+    cmd.data_mode        = data_mode;
+    cmd.data_length      = data_len;
+    cmd.dummycycles      = 0;
+    cmd.sioo_mode        = QSPI_SIOO_INST_EVERY_CMD;
+
+    s_qspi_env.last_op = TUYA_QSPI_WRITE;
+
+    qspi_wait_not_busy();
+    qspi_command_config(&cmd);
+    qspi_data_transmit(data);
+    qspi_wait_transfer_complete();
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
 /**
  * @brief qspi read from addr by mapping mode
- * NOTE: 
+ * NOTE:
  *
  * @param[in] port: qspi port, id index starts at 0
  * @param[out] data:  address of buffer
@@ -72,13 +435,53 @@ OPERATE_RET tkl_qspi_send(TUYA_QSPI_NUM_E port, void *data, uint16_t size)
 OPERATE_RET tkl_qspi_recv(TUYA_QSPI_NUM_E port, void *data, uint16_t size)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    qspi_command_struct cmd;
+    uint32_t data_mode;
+
+    if (port != TUYA_QSPI_NUM_0 || data == NULL || size == 0 || size > MAX_QSPI_FIFO_SIZE) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (!s_qspi_env.inited) {
+        return OPRT_COM_ERROR;
+    }
+
+    if (wire_mode_to_data(s_qspi_env.data_lines, &data_mode)) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (s_qspi_env.data_lines == TUYA_QSPI_4WIRE) {
+        qspi_quad_pins_config();
+    }
+
+    /* data-only read; instruction and address phases belong to tkl_qspi_comand() */
+    qspi_cmd_struct_para_init(&cmd);
+    cmd.instruction_mode = QSPI_INSTRUCTION_NONE;
+    cmd.addr_mode        = QSPI_ADDR_NONE;
+    cmd.altebytes_mode   = QSPI_ALTE_BYTES_NONE;
+    cmd.data_mode        = data_mode;
+    cmd.data_length      = size;
+    cmd.dummycycles      = 0;
+    cmd.sioo_mode        = QSPI_SIOO_INST_EVERY_CMD;
+
+    s_qspi_env.last_op = TUYA_QSPI_READ;
+
+    qspi_wait_not_busy();
+    qspi_command_config(&cmd);
+    qspi_data_receive((uint8_t *)data);
+    qspi_wait_transfer_complete();
+
+    if (s_qspi_env.cb) {
+        s_qspi_env.cb(port, TUYA_QSPI_EVENT_RX);
+    }
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
 /**
  * @brief qspi command send
- * NOTE: 
+ * NOTE:
  *
  * @param[in] port: qspi port, id index starts at 0
  * @param[in] command:  qspi command configure
@@ -88,22 +491,126 @@ OPERATE_RET tkl_qspi_recv(TUYA_QSPI_NUM_E port, void *data, uint16_t size)
 OPERATE_RET tkl_qspi_comand(TUYA_QSPI_NUM_E port, TUYA_QSPI_CMD_T *command)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    qspi_command_struct cmd;
+    uint32_t mode;
+
+    if (port != TUYA_QSPI_NUM_0 || command == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (!s_qspi_env.inited) {
+        return OPRT_COM_ERROR;
+    }
+
+    if (command->data_size > 0 && command->data == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (command->dummy_cycle > QSPI_DUMMY_CYCLES_MAX) {
+        return OPRT_INVALID_PARM;
+    }
+
+    /* the controller holds the instruction in a single 8-bit register */
+    if (command->cmd_size > 1) {
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    qspi_cmd_struct_para_init(&cmd);
+
+    /* instruction phase */
+    if (command->cmd_size == 0) {
+        cmd.instruction_mode = QSPI_INSTRUCTION_NONE;
+    } else {
+        if (wire_mode_to_instruction(command->cmd_lines, &mode)) {
+            return OPRT_INVALID_PARM;
+        }
+        cmd.instruction_mode = mode;
+        cmd.instruction      = command->cmd[0];
+    }
+
+    /* address phase */
+    if (command->addr_size == 0) {
+        cmd.addr_mode = QSPI_ADDR_NONE;
+    } else {
+        if (wire_mode_to_addr(command->addr_lines, &mode)) {
+            return OPRT_INVALID_PARM;
+        }
+        cmd.addr_mode = mode;
+
+        if (addr_size_to_reg(command->addr_size, &mode)) {
+            return OPRT_INVALID_PARM;
+        }
+        cmd.addr_size = mode;
+        cmd.addr      = addr_bytes_to_u32(command->addr, command->addr_size);
+    }
+
+    /* data phase */
+    if (command->data_size == 0) {
+        cmd.data_mode = QSPI_DATA_NONE;
+    } else {
+        if (wire_mode_to_data(command->data_lines, &mode)) {
+            return OPRT_INVALID_PARM;
+        }
+        cmd.data_mode   = mode;
+        cmd.data_length = command->data_size;
+    }
+
+    cmd.altebytes_mode = QSPI_ALTE_BYTES_NONE;
+    cmd.dummycycles    = command->dummy_cycle;
+    cmd.sioo_mode      = QSPI_SIOO_INST_EVERY_CMD;
+
+    if ((command->cmd_size  != 0 && command->cmd_lines  == TUYA_QSPI_4WIRE) ||
+        (command->addr_size != 0 && command->addr_lines == TUYA_QSPI_4WIRE) ||
+        (command->data_size != 0 && command->data_lines == TUYA_QSPI_4WIRE)) {
+        qspi_quad_pins_config();
+    }
+
+    s_qspi_env.last_op = command->op;
+
+    qspi_wait_not_busy();
+    qspi_command_config(&cmd);
+
+    /* with no data phase qspi_command_config() already waited for completion */
+    if (command->data_size == 0) {
+        return OPRT_OK;
+    }
+
+    if (command->op == TUYA_QSPI_WRITE) {
+        qspi_data_transmit(command->data);
+    } else {
+        qspi_data_receive(command->data);
+    }
+
+    qspi_wait_transfer_complete();
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
 /**
  * @brief adort qspi transfer,or qspi send, or qspi recv
- * 
+ *
  * @param[in] port: qspi port
- * 
+ *
  * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
  */
 
 OPERATE_RET tkl_qspi_abort_transfer(TUYA_QSPI_NUM_E port)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    if (port != TUYA_QSPI_NUM_0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (!s_qspi_env.inited) {
+        return OPRT_COM_ERROR;
+    }
+
+    qspi_transmission_abort();
+    qspi_wait_not_busy();
+    qspi_flag_clear(QSPI_FLAG_TC);
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
@@ -119,7 +626,13 @@ OPERATE_RET tkl_qspi_abort_transfer(TUYA_QSPI_NUM_E port)
 OPERATE_RET tkl_qspi_irq_init(TUYA_QSPI_NUM_E port, TUYA_QSPI_IRQ_CB cb)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    if (port != TUYA_QSPI_NUM_0 || cb == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    s_qspi_env.cb = cb;
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
@@ -133,7 +646,19 @@ OPERATE_RET tkl_qspi_irq_init(TUYA_QSPI_NUM_E port, TUYA_QSPI_IRQ_CB cb)
 OPERATE_RET tkl_qspi_irq_enable(TUYA_QSPI_NUM_E port)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    if (port != TUYA_QSPI_NUM_0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (s_qspi_env.cb == NULL) {
+        return OPRT_COM_ERROR;
+    }
+
+    qspi_interrupt_flag_clear(QSPI_INT_FLAG_TC | QSPI_INT_FLAG_TERR);
+    qspi_interrupt_enable(QSPI_INT_TC | QSPI_INT_TERR);
+    eclic_irq_enable(QSPI_IRQn, 9, 0);
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
@@ -147,7 +672,13 @@ OPERATE_RET tkl_qspi_irq_enable(TUYA_QSPI_NUM_E port)
 OPERATE_RET tkl_qspi_irq_disable(TUYA_QSPI_NUM_E port)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    if (port != TUYA_QSPI_NUM_0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    eclic_irq_disable(QSPI_IRQn);
+    qspi_interrupt_disable(QSPI_INT_TC | QSPI_INT_TERR);
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
-

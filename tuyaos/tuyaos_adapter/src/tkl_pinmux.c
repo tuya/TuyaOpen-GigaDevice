@@ -10,9 +10,282 @@
  */
 
 // --- BEGIN: user defines and implements ---
+#include "gd32vw55x_gpio.h"
+#include "gd32vw55x_rcu.h"
 #include "tkl_pinmux.h"
 #include "tuya_error_code.h"
+
+/*
+ * GD32VW553 pin numbering used by this adapter (must stay in sync with tkl_gpio.c):
+ *
+ *   TUYA_IO_PIN_0  .. TUYA_IO_PIN_15  ->  PA0  .. PA15
+ *   TUYA_IO_PIN_16 .. TUYA_IO_PIN_20  ->  PB0  .. PB4
+ *   TUYA_IO_PIN_21 .. TUYA_IO_PIN_23  ->  PB11 .. PB13
+ *   TUYA_IO_PIN_24                    ->  PB15          (PB14 not present on this chip)
+ *   TUYA_IO_PIN_25                    ->  PC8
+ *   TUYA_IO_PIN_26 .. TUYA_IO_PIN_28  ->  PC13 .. PC15
+ *
+ * The GD32VW553-TY1 module only bonds out PA0-PA8, PB0, PB1, PB15, PC8, PC14, PC15;
+ * the remaining entries are chip pins usable on bare-die designs.
+ */
+#define GD32_PIN_ID_MAX     29
+
+/* electrical profile applied together with the alternate function */
+typedef enum {
+    PIN_DRV_PP,         /* push-pull, no pull      - SPI / PWM / UART flow control */
+    PIN_DRV_PP_PU,      /* push-pull, pull-up      - UART TX/RX                    */
+    PIN_DRV_OD_PU,      /* open-drain, pull-up     - I2C                           */
+} gd32_pin_drv_e;
+
+typedef struct {
+    uint16_t        pin;        /* TUYA_IO_PIN_x                */
+    uint16_t        func;       /* TUYA_PIN_FUNC_E              */
+    uint8_t         af;         /* GD32 alternate function idx  */
+    uint8_t         drv;        /* gd32_pin_drv_e               */
+} gd32_pinmux_map_t;
+
+/*
+ * Alternate-function map.
+ *
+ * Every AF index below is taken from silicon-proven GD32VW553 code shipped with the
+ * SDK (MSDK/plf/src/uart/uart.h, spi_i2s.c, spi.h, qspi_flash_api.c, MBL/mainboot/mbl.c)
+ * or from the peripheral drivers in this adapter (tkl_i2c.c, tkl_spi.c, tkl_pwm.c),
+ * and cross-checked against the per-pin function list in the GD32VW553-TY1 datasheet
+ * (Rev0.5, Table 4-1).
+ *
+ * NOTE: the module datasheet lists *which* alternate functions a pin has, in ascending
+ * AF order, but not the AF index itself, and the lists contain gaps. Combinations that
+ * could not be pinned to a definite AF index are deliberately left out of this table -
+ * tkl_io_pinmux_config() reports OPRT_NOT_SUPPORTED for them rather than programming a
+ * guessed value. Add them here once the GD32VW553 user manual AF table is available.
+ */
+static const gd32_pinmux_map_t pinmux_map[] = {
+    /* ---- USART0 -> TUYA_UART0 ---------------------------------------------- */
+    {TUYA_IO_PIN_0,  TUYA_UART0_TX,  GPIO_AF_0,  PIN_DRV_PP_PU},  /* PA0  */
+    {TUYA_IO_PIN_1,  TUYA_UART0_RX,  GPIO_AF_0,  PIN_DRV_PP_PU},  /* PA1  */
+    {TUYA_IO_PIN_2,  TUYA_UART0_CTS, GPIO_AF_0,  PIN_DRV_PP},     /* PA2  */
+    {TUYA_IO_PIN_3,  TUYA_UART0_RTS, GPIO_AF_0,  PIN_DRV_PP_PU},  /* PA3  */
+    {TUYA_IO_PIN_8,  TUYA_UART0_RX,  GPIO_AF_2,  PIN_DRV_PP_PU},  /* PA8,  see note below */
+    {TUYA_IO_PIN_15, TUYA_UART0_RX,  GPIO_AF_7,  PIN_DRV_PP_PU},  /* PA15 */
+    {TUYA_IO_PIN_24, TUYA_UART0_TX,  GPIO_AF_8,  PIN_DRV_PP_PU},  /* PB15, see note below */
+    /* note: uart.h has these two the other way round in its PLATFORM_BOARD_32VW55X_F527
+     *       branch - PA8 as TX, PB15 as RX. That branch is dead on this board (CONFIG_BOARD
+     *       is hardcoded to PLATFORM_BOARD_32VW55X_EVAL), and two independent sources say it
+     *       is simply wrong: the chip datasheet AF table (Table 2-5/2-6 - PA8 AF2 is
+     *       USART0_RX, PB15 AF8 is USART0_TX) and the LCKFB board documentation, which
+     *       configures exactly these pins as TX=PB15/AF8, RX=PA8/AF2. The AF index is the
+     *       same either way, so only the direction was ever in question. */
+
+    /* ---- UART1 -> TUYA_UART1 ----------------------------------------------- */
+    {TUYA_IO_PIN_0,  TUYA_UART1_CTS, GPIO_AF_7,  PIN_DRV_PP},     /* PA0  */
+    {TUYA_IO_PIN_1,  TUYA_UART1_RTS, GPIO_AF_7,  PIN_DRV_PP_PU},  /* PA1  */
+    {TUYA_IO_PIN_4,  TUYA_UART1_TX,  GPIO_AF_0,  PIN_DRV_PP_PU},  /* PA4  */
+    {TUYA_IO_PIN_5,  TUYA_UART1_RX,  GPIO_AF_0,  PIN_DRV_PP_PU},  /* PA5  */
+    {TUYA_IO_PIN_8,  TUYA_UART1_RX,  GPIO_AF_3,  PIN_DRV_PP_PU},  /* PA8  */
+    {TUYA_IO_PIN_24, TUYA_UART1_TX,  GPIO_AF_7,  PIN_DRV_PP_PU},  /* PB15 */
+
+    /* ---- UART2 -> TUYA_UART2 (module log / download port) ------------------- */
+    {TUYA_IO_PIN_6,  TUYA_UART2_TX,  GPIO_AF_10, PIN_DRV_PP_PU},  /* PA6  */
+    {TUYA_IO_PIN_7,  TUYA_UART2_RX,  GPIO_AF_8,  PIN_DRV_PP_PU},  /* PA7  */
+    {TUYA_IO_PIN_16, TUYA_UART2_CTS, GPIO_AF_10, PIN_DRV_PP},     /* PB0  */
+    {TUYA_IO_PIN_17, TUYA_UART2_RTS, GPIO_AF_10, PIN_DRV_PP_PU},  /* PB1  */
+
+    /* ---- I2C0 -> TUYA_IIC0 -------------------------------------------------- */
+    {TUYA_IO_PIN_2,  TUYA_IIC0_SCL,  GPIO_AF_4,  PIN_DRV_OD_PU},  /* PA2  */
+    {TUYA_IO_PIN_3,  TUYA_IIC0_SDA,  GPIO_AF_4,  PIN_DRV_OD_PU},  /* PA3  */
+
+    /* ---- I2C1 -> TUYA_IIC1 -------------------------------------------------- */
+    {TUYA_IO_PIN_15, TUYA_IIC1_SCL,  GPIO_AF_6,  PIN_DRV_OD_PU},  /* PA15 */
+    {TUYA_IO_PIN_8,  TUYA_IIC1_SDA,  GPIO_AF_6,  PIN_DRV_OD_PU},  /* PA8  */
+
+    /* ---- SPI -> TUYA_SPI0 (GD32VW553 has a single SPI block) ---------------- */
+    {TUYA_IO_PIN_0,  TUYA_SPI0_MOSI, GPIO_AF_5,  PIN_DRV_PP},     /* PA0  */
+    {TUYA_IO_PIN_1,  TUYA_SPI0_MISO, GPIO_AF_5,  PIN_DRV_PP},     /* PA1  */
+    {TUYA_IO_PIN_2,  TUYA_SPI0_CLK,  GPIO_AF_5,  PIN_DRV_PP},     /* PA2  */
+    {TUYA_IO_PIN_5,  TUYA_SPI0_MISO, GPIO_AF_4,  PIN_DRV_PP},     /* PA5  */
+    {TUYA_IO_PIN_9,  TUYA_SPI0_MOSI, GPIO_AF_0,  PIN_DRV_PP},     /* PA9  */
+    {TUYA_IO_PIN_10, TUYA_SPI0_MISO, GPIO_AF_0,  PIN_DRV_PP},     /* PA10 */
+    {TUYA_IO_PIN_11, TUYA_SPI0_CLK,  GPIO_AF_0,  PIN_DRV_PP},     /* PA11 */
+    {TUYA_IO_PIN_12, TUYA_SPI0_CS,   GPIO_AF_6,  PIN_DRV_PP},     /* PA12 */
+
+    /* ---- PWM -> TUYA_PWMx (index must match pwm_dev[] in tkl_pwm.c) --------- */
+    {TUYA_IO_PIN_8,  TUYA_PWM0,      GPIO_AF_1,  PIN_DRV_PP},     /* PA8,  TIMER0_CH0  */
+    {TUYA_IO_PIN_23, TUYA_PWM1,      GPIO_AF_8,  PIN_DRV_PP},     /* PB13, TIMER15_CH0 */
+    {TUYA_IO_PIN_10, TUYA_PWM2,      GPIO_AF_7,  PIN_DRV_PP},     /* PA10, TIMER16_CH0 */
+};
+
+/* ADC routine channel per pin, from the datasheet "Additional: ADC_INx" column and
+ * confirmed by the PA0-PA7 / PB0 analog setup in tkl_adc.c. */
+static const int8_t adc_channel_map[GD32_PIN_ID_MAX] = {
+    [TUYA_IO_PIN_0]  = 0,  [TUYA_IO_PIN_1]  = 1,  [TUYA_IO_PIN_2]  = 2,
+    [TUYA_IO_PIN_3]  = 3,  [TUYA_IO_PIN_4]  = 4,  [TUYA_IO_PIN_5]  = 5,
+    [TUYA_IO_PIN_6]  = 6,  [TUYA_IO_PIN_7]  = 7,  [TUYA_IO_PIN_16] = 8,   /* PB0 */
+    /* every other entry stays 0 and is rejected by the pin check below */
+};
+
+static int pin_id_to_gpio(uint32_t pin_id, uint32_t *group, uint32_t *pin_num)
+{
+    if (pin_id <= TUYA_IO_PIN_15) {                 /* PA0 - PA15  */
+        *group   = GPIOA;
+        *pin_num = BIT(pin_id);
+    } else if (pin_id <= TUYA_IO_PIN_20) {          /* PB0 - PB4   */
+        *group   = GPIOB;
+        *pin_num = BIT(pin_id - TUYA_IO_PIN_16);
+    } else if (pin_id <= TUYA_IO_PIN_24) {          /* PB11 - PB13, PB15 */
+        *group   = GPIOB;
+        *pin_num = (pin_id == TUYA_IO_PIN_24) ? GPIO_PIN_15 : BIT(pin_id - 10);
+    } else if (pin_id == TUYA_IO_PIN_25) {          /* PC8         */
+        *group   = GPIOC;
+        *pin_num = GPIO_PIN_8;
+    } else if (pin_id < GD32_PIN_ID_MAX) {          /* PC13 - PC15 */
+        *group   = GPIOC;
+        *pin_num = BIT(pin_id - 13);
+    } else {
+        return -1;
+    }
+
+    return 0;
+}
+
+static void gpio_group_clock_enable(uint32_t group)
+{
+    switch (group) {
+    case GPIOA:
+        rcu_periph_clock_enable(RCU_GPIOA);
+        break;
+    case GPIOB:
+        rcu_periph_clock_enable(RCU_GPIOB);
+        break;
+    case GPIOC:
+        rcu_periph_clock_enable(RCU_GPIOC);
+        break;
+    default:
+        break;
+    }
+}
+
+/* tkl_i2c.c keeps the pins each I2C port is wired to, so that moving them off the
+ * controller's own pads switches it to the bit-banged master */
+extern void __tkl_uart_set_tx_pin(TUYA_UART_NUM_E port, TUYA_PIN_NAME_E tx_pin);
+extern void __tkl_uart_set_rx_pin(TUYA_UART_NUM_E port, TUYA_PIN_NAME_E rx_pin);
+extern void __tkl_i2c_set_scl_pin(TUYA_I2C_NUM_E port, TUYA_PIN_NAME_E scl_pin);
+extern void __tkl_i2c_set_sda_pin(TUYA_I2C_NUM_E port, TUYA_PIN_NAME_E sda_pin);
+
+static const gd32_pinmux_map_t *pinmux_map_find(TUYA_PIN_NAME_E pin, TUYA_PIN_FUNC_E pin_func)
+{
+    uint32_t i;
+
+    for (i = 0; i < sizeof(pinmux_map) / sizeof(pinmux_map[0]); i++) {
+        if (pinmux_map[i].pin == pin && pinmux_map[i].func == pin_func) {
+            return &pinmux_map[i];
+        }
+    }
+
+    return NULL;
+}
 // --- END: user defines and implements ---
+
+/**
+ * @brief tuya io pinmux func
+ *
+ * @param[in] pin: pin number
+ * @param[in] pin_func: pin function
+ *
+ * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
+ */
+OPERATE_RET tkl_io_pinmux_config(TUYA_PIN_NAME_E pin, TUYA_PIN_FUNC_E pin_func)
+{
+    // --- BEGIN: user implements ---
+    const gd32_pinmux_map_t *map;
+    uint32_t group, pin_num;
+
+    if (pin_id_to_gpio(pin, &group, &pin_num)) {
+        return OPRT_INVALID_PARM;
+    }
+
+    gpio_group_clock_enable(group);
+
+    /* Record I2C pin choices before anything else. Any pin can carry I2C because the
+     * driver falls back to bit-banging when the pair is not the controller's own, so
+     * this is not rejected even when the combination is absent from pinmux_map[]. */
+    switch (pin_func) {
+    /* Tell tkl_uart which pad this port is really on, so its init leaves the reset default
+     * alone. Same contract as the i2c pins below: the board states its wiring once, from
+     * board_register_hardware(), and the application never names a pin. */
+    case TUYA_UART0_TX:
+        __tkl_uart_set_tx_pin(TUYA_UART_NUM_0, pin);
+        break;
+    case TUYA_UART0_RX:
+        __tkl_uart_set_rx_pin(TUYA_UART_NUM_0, pin);
+        break;
+    case TUYA_UART1_TX:
+        __tkl_uart_set_tx_pin(TUYA_UART_NUM_1, pin);
+        break;
+    case TUYA_UART1_RX:
+        __tkl_uart_set_rx_pin(TUYA_UART_NUM_1, pin);
+        break;
+    case TUYA_UART2_TX:
+        __tkl_uart_set_tx_pin(TUYA_UART_NUM_2, pin);
+        break;
+    case TUYA_UART2_RX:
+        __tkl_uart_set_rx_pin(TUYA_UART_NUM_2, pin);
+        break;
+    case TUYA_IIC0_SCL:
+        __tkl_i2c_set_scl_pin(TUYA_I2C_NUM_0, pin);
+        break;
+    case TUYA_IIC0_SDA:
+        __tkl_i2c_set_sda_pin(TUYA_I2C_NUM_0, pin);
+        break;
+    case TUYA_IIC1_SCL:
+        __tkl_i2c_set_scl_pin(TUYA_I2C_NUM_1, pin);
+        break;
+    case TUYA_IIC1_SDA:
+        __tkl_i2c_set_sda_pin(TUYA_I2C_NUM_1, pin);
+        break;
+    default:
+        break;
+    }
+
+    /* release the pin back to plain GPIO */
+    if (pin_func == TUYA_GPIO) {
+        gpio_af_set(group, GPIO_AF_0, pin_num);
+        gpio_mode_set(group, GPIO_MODE_INPUT, GPIO_PUPD_NONE, pin_num);
+        return OPRT_OK;
+    }
+
+    map = pinmux_map_find(pin, pin_func);
+    if (map == NULL) {
+        /* An I2C signal on a pin the controller cannot reach is still legal: the pins
+         * were recorded above and tkl_i2c_init() will drive them from GPIO. Everything
+         * else genuinely has no alternate function here. */
+        if (pin_func == TUYA_IIC0_SCL || pin_func == TUYA_IIC0_SDA ||
+            pin_func == TUYA_IIC1_SCL || pin_func == TUYA_IIC1_SDA) {
+            return OPRT_OK;
+        }
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    gpio_af_set(group, map->af, pin_num);
+
+    switch (map->drv) {
+    case PIN_DRV_OD_PU:
+        gpio_mode_set(group, GPIO_MODE_AF, GPIO_PUPD_PULLUP, pin_num);
+        gpio_output_options_set(group, GPIO_OTYPE_OD, GPIO_OSPEED_25MHZ, pin_num);
+        break;
+    case PIN_DRV_PP_PU:
+        gpio_mode_set(group, GPIO_MODE_AF, GPIO_PUPD_PULLUP, pin_num);
+        gpio_output_options_set(group, GPIO_OTYPE_PP, GPIO_OSPEED_25MHZ, pin_num);
+        break;
+    case PIN_DRV_PP:
+    default:
+        gpio_mode_set(group, GPIO_MODE_AF, GPIO_PUPD_NONE, pin_num);
+        gpio_output_options_set(group, GPIO_OTYPE_PP, GPIO_OSPEED_MAX, pin_num);
+        break;
+    }
+
+    return OPRT_OK;
+    // --- END: user implements ---
+}
 
 /**
  * @brief tuya multiple io pinmux func
@@ -24,7 +297,21 @@
 OPERATE_RET tkl_multi_io_pinmux_config(TUYA_MUL_PIN_CFG_T *cfg, uint16_t num)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    OPERATE_RET rt;
+    uint16_t i;
+
+    if (cfg == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    for (i = 0; i < num; i++) {
+        rt = tkl_io_pinmux_config(cfg[i].pin, cfg[i].pin_func);
+        if (rt != OPRT_OK) {
+            return rt;
+        }
+    }
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 
@@ -40,7 +327,33 @@ OPERATE_RET tkl_multi_io_pinmux_config(TUYA_MUL_PIN_CFG_T *cfg, uint16_t num)
 int32_t tkl_io_pin_to_func(uint32_t pin, TUYA_PIN_TYPE_E pin_type)
 {
     // --- BEGIN: user implements ---
-    return 0;
+    uint32_t i;
+
+    if (pin >= GD32_PIN_ID_MAX) {
+        return OPRT_INVALID_PARM;
+    }
+
+    switch (pin_type) {
+    case TUYA_IO_TYPE_ADC:
+        /* single ADC block -> port 0, channel only */
+        if (pin <= TUYA_IO_PIN_7 || pin == TUYA_IO_PIN_16) {
+            return adc_channel_map[pin];
+        }
+        break;
+
+    case TUYA_IO_TYPE_PWM:
+        for (i = 0; i < sizeof(pinmux_map) / sizeof(pinmux_map[0]); i++) {
+            if (pinmux_map[i].pin == pin &&
+                pinmux_map[i].func >= TUYA_PWM0 && pinmux_map[i].func <= TUYA_PWM5) {
+                return pinmux_map[i].func - TUYA_PWM0;
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }
-

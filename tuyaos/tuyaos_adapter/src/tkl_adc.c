@@ -16,7 +16,13 @@
 #include "tuya_error_code.h"
 #include "wrapper_os.h"
 #include "dbg_print.h"
+#include "gd32_peri_busy.h"
 // --- END: user defines and implements ---
+
+/* Conversions here arm the adc and then sys_ms_sleep() waiting for it, so the calling task is
+ * blocked with hardware running - exactly when idle would pick stop mode and take the adc clock
+ * away. gd32_peri_busy_inc() holds it off; the count makes the nesting of read_voltage ->
+ * read_data -> read_single_channel safe. */
 
 /**
  * @brief tuya kernel adc init
@@ -30,6 +36,10 @@
 #define ADC_DEV_NUM           1
 #define ADC_DEV_CHNL_SUM      9
 #define ADC_VOL_MAX           3300    // mv
+
+/* SAMPTX_SPT index used when TUYA_ADC_BASE_CFG_T.freq is left at 0.
+ * 0:1.5  1:2.5  2:14.5  3:27.5  4:55.5  5:83.5  6:111.5  7:143.5  8:479.5 cycles */
+#define ADC_DEFAULT_SAMPLE_IDX  4
 
 typedef struct adc_env
 {
@@ -116,29 +126,43 @@ OPERATE_RET tkl_adc_init(TUYA_ADC_NUM_E port_num, TUYA_ADC_BASE_CFG_T *cfg)
     adc_data_alignment_config(ADC_DATAALIGN_RIGHT);
 
     if (cfg->freq == 0) {
-        adc_samp = 4;
+        /* No sample rate asked for, so nothing is forcing the conversion to be short.
+         * Pick a sample time that lets the sample-and-hold capacitor actually settle:
+         * index 4 is 55.5 ADC cycles, 1.39 us at the 40 MHz ADC clock, good for source
+         * impedances up to a few tens of kohm and still ~590 ksps end to end.
+         *
+         * This used to feed a dummy budget of 4 cycles into the table below, which
+         * always landed on index 0 - 1.5 cycles, 37.5 ns. That is too short for
+         * anything but a very stiff source: driving a pin straight from the 3V3 rail
+         * still read 4006 instead of 4095 on the first conversion after adc_enable(). */
+        adc_env_info.adc_samp = ADC_DEFAULT_SAMPLE_IDX;
     } else {
+        /* budget, in ADC clock cycles, for one conversion at the requested rate;
+         * pick the longest sample time that still fits (conversion itself costs
+         * `width` cycles on top of the sample time) */
         adc_samp = 40000000 / cfg->freq;
-    }
 
-    if (adc_samp > 0 && adc_samp < (2 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 0;
-    } else if (adc_samp >= (2 + adc_env_info.width) && adc_samp < (9 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 1;
-    } else if (adc_samp >= (9 + adc_env_info.width) && adc_samp < (21 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 2;
-    } else if (adc_samp >= (21 + adc_env_info.width) && adc_samp < (41 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 3;
-    } else if (adc_samp >= (41 + adc_env_info.width) && adc_samp < (70 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 4;
-    } else if (adc_samp >= (70 + adc_env_info.width) && adc_samp < (98 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 5;
-    } else if (adc_samp >= (98 + adc_env_info.width) && adc_samp < (128 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 6;
-    } else if (adc_samp >= (128 + adc_env_info.width) && adc_samp < (312 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 7;
-    } else if (adc_samp >= (312 + adc_env_info.width)) {
-        adc_env_info.adc_samp = 8;
+        if (adc_samp >= (312 + adc_env_info.width)) {
+            adc_env_info.adc_samp = 8;
+        } else if (adc_samp >= (128 + adc_env_info.width)) {
+            adc_env_info.adc_samp = 7;
+        } else if (adc_samp >= (98 + adc_env_info.width)) {
+            adc_env_info.adc_samp = 6;
+        } else if (adc_samp >= (70 + adc_env_info.width)) {
+            adc_env_info.adc_samp = 5;
+        } else if (adc_samp >= (41 + adc_env_info.width)) {
+            adc_env_info.adc_samp = 4;
+        } else if (adc_samp >= (21 + adc_env_info.width)) {
+            adc_env_info.adc_samp = 3;
+        } else if (adc_samp >= (9 + adc_env_info.width)) {
+            adc_env_info.adc_samp = 2;
+        } else if (adc_samp >= (2 + adc_env_info.width)) {
+            adc_env_info.adc_samp = 1;
+        } else {
+            /* asked for more than the ADC can deliver - take the shortest sample time
+             * rather than leaving the previous setting in place */
+            adc_env_info.adc_samp = 0;
+        }
     }
 
     if (cfg->ch_nums == ADC_DEV_CHNL_SUM) {
@@ -285,6 +309,8 @@ int32_t tkl_adc_temperature_get(void)
     int32_t temperature;
     uint16_t adc_value;
 
+    gd32_peri_busy_inc();
+
     adc_flag_clear(ADC_FLAG_EOC);
     /* ADC external trigger disable */
     adc_external_trigger_config(ADC_ROUTINE_CHANNEL, EXTERNAL_TRIGGER_DISABLE);
@@ -327,6 +353,8 @@ int32_t tkl_adc_temperature_get(void)
     /* value convert */
     temperature = (int32_t)((1.43f - adc_value * 3.3f / 4096) * 1000 / 4.3f + 25);
 
+    gd32_peri_busy_dec();
+
     return temperature;
     // --- END: user implements ---
 }
@@ -355,6 +383,8 @@ OPERATE_RET tkl_adc_read_data(TUYA_ADC_NUM_E port_num, int32_t *buff, uint16_t l
         return OPRT_COM_ERROR;
     }
 
+    gd32_peri_busy_inc();
+
     adc_flag_clear(ADC_FLAG_EOC);
     if (adc_env_info.mode != TUYA_ADC_SCAN) {
         uint8_t buf_idx = 0;
@@ -370,6 +400,7 @@ OPERATE_RET tkl_adc_read_data(TUYA_ADC_NUM_E port_num, int32_t *buff, uint16_t l
         uint8_t rank = 0;
 
         if (p_adc_value == NULL) {
+            gd32_peri_busy_dec();
             return OPRT_MALLOC_FAILED;
         }
 
@@ -426,6 +457,8 @@ OPERATE_RET tkl_adc_read_data(TUYA_ADC_NUM_E port_num, int32_t *buff, uint16_t l
 
         sys_mfree(p_adc_value);
     }
+
+    gd32_peri_busy_dec();
     return status ;
     // --- END: user implements ---
 }
@@ -448,6 +481,8 @@ OPERATE_RET tkl_adc_read_single_channel(TUYA_ADC_NUM_E port_num, uint8_t ch_id, 
     if (port_num > ADC_DEV_NUM || ch_id > ADC_DEV_CHNL_SUM) {
         return OPRT_INVALID_PARM;
     }
+
+    gd32_peri_busy_inc();
 
     adc_flag_clear(ADC_FLAG_EOC);
     adc_resolution_config(CTL0_DRES(adc_env_info.width));
@@ -479,6 +514,7 @@ OPERATE_RET tkl_adc_read_single_channel(TUYA_ADC_NUM_E port_num, uint8_t ch_id, 
         uint16_t *p_adc_value = sys_malloc(sizeof(uint16_t) * adc_env_info.conv_cnt);
 
         if (p_adc_value == NULL) {
+            gd32_peri_busy_dec();
             return OPRT_MALLOC_FAILED;
         }
 
@@ -521,6 +557,7 @@ OPERATE_RET tkl_adc_read_single_channel(TUYA_ADC_NUM_E port_num, uint8_t ch_id, 
         sys_mfree(p_adc_value);
     }
 
+    gd32_peri_busy_dec();
     return status;
     // --- END: user implements ---
 }
@@ -537,7 +574,32 @@ OPERATE_RET tkl_adc_read_single_channel(TUYA_ADC_NUM_E port_num, uint8_t ch_id, 
 OPERATE_RET tkl_adc_read_voltage(TUYA_ADC_NUM_E port_num, int32_t *buff, uint16_t len)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    OPERATE_RET rt;
+    uint32_t full_scale, count;
+    uint16_t i;
+
+    if (port_num > ADC_DEV_NUM || buff == NULL || len == 0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    rt = tkl_adc_read_data(port_num, buff, len);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+
+    /* tkl_adc_read_data() only fills ch_nums * conv_cnt entries, so scale exactly
+     * those and leave the rest of the caller's buffer untouched */
+    count = (uint32_t)adc_env_info.ch_nums * adc_env_info.conv_cnt;
+    if (count > len) {
+        count = len;
+    }
+
+    full_scale = (1UL << adc_env_info.width) - 1UL;
+    for (i = 0; i < count; i++) {
+        buff[i] = (int32_t)(((uint32_t)buff[i] * ADC_VOL_MAX) / full_scale);
+    }
+
+    return OPRT_OK;
     // --- END: user implements ---
 }
 

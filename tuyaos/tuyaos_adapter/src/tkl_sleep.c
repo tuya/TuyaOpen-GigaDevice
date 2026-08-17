@@ -11,8 +11,48 @@
 
 // --- BEGIN: user defines and implements ---
 #include "tkl_sleep.h"
+#include "gd32_peri_busy.h"
 #include "tuya_error_code.h"
 #include "wrapper_os.h"
+#include "wakelock.h"
+#include <stdbool.h>
+#include <stdatomic.h>
+
+/* closed mac library, declared in macsw/export/wifi_export.h */
+extern void wifi_core_task_resume(bool isr);
+
+/* SDK lock ids 0..4 are wlan, usart, systick, ble, spi; 5 and 6 are the first ones free. Idle
+ * only sleeps once every lock is clear - wifi_sw_init() holds LOCK_ID_WLAN for the life of the
+ * stack, so an application keeping wifi up relies on the notification at the end of
+ * tkl_cpu_sleep_mode_set() to make the mac let go. */
+#define TKL_WAKELOCK_ID     5
+
+/* Id 6 is the odd one out: tickless_sleep.c masks it out of freertos_ready_to_sleep() and tests
+ * it separately, so it bars the deep path only. Held by a peripheral that needs its clock to
+ * keep running - dma still moving, pwm still driving a pin, hardware timer still counting - all
+ * of which shallow sleep serves perfectly while still stopping the core. Deep sleep is what
+ * would cut them off, since it takes the whole 1.2V clock tree down.
+ *
+ * The SDK's own usart and spi ids are no use here: nothing but the vendor console and the at
+ * command layer ever takes them, the drivers never do. Counted, after the reference single
+ * core port's peri_busy_count. */
+#define TKL_BUSY_LOCK_ID    6
+
+static atomic_int peri_busy_count = ATOMIC_VAR_INIT(0);
+
+void gd32_peri_busy_inc(void)
+{
+    if (atomic_fetch_add(&peri_busy_count, 1) == 0) {
+        sys_wakelock_acquire(TKL_BUSY_LOCK_ID);
+    }
+}
+
+void gd32_peri_busy_dec(void)
+{
+    if (atomic_fetch_sub(&peri_busy_count, 1) == 1) {
+        sys_wakelock_release(TKL_BUSY_LOCK_ID);
+    }
+}
 // --- END: user defines and implements ---
 
 /**
@@ -25,6 +65,10 @@
 OPERATE_RET tkl_cpu_sleep_callback_register(TUYA_SLEEP_CB_T *sleep_cb)
 {
     // --- BEGIN: user implements ---
+    /* Entering low power is owned by the SDK power-save manager (sys_ps_set), which
+     * exposes no pre-sleep / post-wakeup hook to hang these callbacks on. Registering
+     * them here would leave the caller believing they will run, so report the gap
+     * instead. Revisit if the RTOS wrapper ever grows a power-state notifier. */
     return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }
@@ -39,7 +83,7 @@ OPERATE_RET tkl_cpu_sleep_callback_register(TUYA_SLEEP_CB_T *sleep_cb)
 void tkl_cpu_allow_sleep(void)
 {
     // --- BEGIN: user implements ---
-    return ;
+    sys_wakelock_release(TKL_WAKELOCK_ID);
     // --- END: user implements ---
 }
 
@@ -53,7 +97,9 @@ void tkl_cpu_allow_sleep(void)
 void tkl_cpu_force_wakeup(void)
 {
     // --- BEGIN: user implements ---
-    return ;
+    /* Hold the lock so idle stops agreeing to sleep. The core is already running by
+     * definition - whoever calls this wants it to stay that way. */
+    sys_wakelock_acquire(TKL_WAKELOCK_ID);
     // --- END: user implements ---
 }
 
@@ -70,15 +116,36 @@ void tkl_cpu_force_wakeup(void)
 OPERATE_RET tkl_cpu_sleep_mode_set(BOOL_T enable, TUYA_CPU_SLEEP_MODE_E mode)
 {
     // --- BEGIN: user implements ---
-    if (mode == TUYA_CPU_DEEP_SLEEP) {
-        if (enable) {
-            sys_ps_set(1);
-        } else {
-            sys_ps_set(0);
-        }
-    } else {
+    switch (mode) {
+    case TUYA_CPU_SLEEP:
+        /* Despite the constant's name this is the chip's stop mode: pll and crystal halted,
+         * ram, peripherals and any wifi association intact, execution resuming where it
+         * stopped - which is what TUYA_CPU_SLEEP promises. Only exti-routed sources wake it,
+         * gpio and rtc included, since the bus clocks are down. SYS_PS_OFF would leave a
+         * bare __WFI() that halts nothing but the core, and tells the wifi stack no power
+         * saving is wanted, so an associated device would never sleep at all. */
+        sys_ps_set(enable ? SYS_PS_DEEP_SLEEP : SYS_PS_OFF);
+        break;
+
+    case TUYA_CPU_DEEP_SLEEP:
+        /* Not implemented: state discarded and woken through reset would be
+         * pmu_to_standbymode(), which no code in this SDK has ever called and which needs
+         * the wakeup sources persisted across the reset first. */
+        return OPRT_NOT_SUPPORTED;
+
+    default:
         return OPRT_NOT_SUPPORTED;
     }
+
+    if (enable) {
+        sys_wakelock_release(TKL_WAKELOCK_ID);
+    } else {
+        sys_wakelock_acquire(TKL_WAKELOCK_ID);
+    }
+
+    /* Not decoration - cmd_shell.c pairs one with its own sys_ps_set(), and measured on a
+     * board with wifi up this is the only thing that gets LOCK_ID_WLAN released. */
+    wifi_core_task_resume(false);
 
     return OPRT_OK;
     // --- END: user implements ---
