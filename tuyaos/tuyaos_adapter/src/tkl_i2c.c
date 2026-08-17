@@ -12,10 +12,40 @@
 // --- BEGIN: user defines and implements ---
 #include "gd32vw55x.h"
 #include "tkl_i2c.h"
+#include "tkl_gpio.h"
+#include "tkl_mutex.h"
 #include "gd32vw55x_i2c.h"
 #include "gd32vw55x_it.h"
+#include "wrapper_os.h"
 #include "tuya_error_code.h"
+#include "gd32_peri_busy.h"
+#include <stdatomic.h>
 // --- END: user defines and implements ---
+
+/* TUYA_I2C_NUM_MAX is the common upper bound shared by all platforms; GD32VW553 has
+ * two I2C controllers. */
+#define GD32_I2C_NUM    2
+
+/* Sleeping mid-transaction stops the bus clock with the slave half way through a byte, and
+ * xfer_pending makes that worse: it deliberately withholds the stop condition so the caller can
+ * issue a repeated start, which means the bus stays held after the call has already returned and
+ * the task is free to block. So the vote spans the whole transaction, not the call, and is
+ * dropped by whichever transfer finally lets the bus go - or by any that fails. */
+static atomic_int i2c_vote[GD32_I2C_NUM];
+
+static void i2c_busy_hold(TUYA_I2C_NUM_E port)
+{
+    if (atomic_exchange(&i2c_vote[port], 1) == 0) {
+        gd32_peri_busy_inc();
+    }
+}
+
+static void i2c_busy_release(TUYA_I2C_NUM_E port)
+{
+    if (atomic_exchange(&i2c_vote[port], 0) == 1) {
+        gd32_peri_busy_dec();
+    }
+}
 
 uint8_t addr_width = 0;
 
@@ -27,10 +57,557 @@ typedef struct i2c_irq_cb_item
 
 struct i2c_irq_driver
 {
-    i2c_irq_cb_item_t i2c_irq_cbs[TUYA_I2C_NUM_MAX];
+    i2c_irq_cb_item_t i2c_irq_cbs[GD32_I2C_NUM];
 };
 
 static struct i2c_irq_driver i2c_irq_mgr = {0};
+
+/* bytes moved by the most recent transfer on each port, reported by
+ * tkl_i2c_get_data_count() */
+static uint32_t i2c_xfer_count[GD32_I2C_NUM] = {0};
+
+/*
+ * Hardware or bit-banged, decided by the pins.
+ *
+ * i2c_pin[] starts out holding the pins the on-chip controller is wired to, so a board
+ * that never calls tkl_io_pinmux_config() keeps using hardware I2C exactly as before.
+ * tkl_io_pinmux_config(pin, TUYA_IICx_SCL/SDA) reaches __tkl_i2c_set_scl_pin()/
+ * __tkl_i2c_set_sda_pin() below and overwrites them; if the resulting pair is no longer
+ * a hardware group, tkl_i2c_init() falls back to driving the lines from GPIO.
+ *
+ * The GD32VW553 controller only reaches these pins:
+ *   I2C0  SCL PA2  (AF4)   SDA PA3  (AF4)
+ *   I2C1  SCL PA15 (AF6)   SDA PA8  (AF6)
+ */
+typedef struct {
+    TUYA_GPIO_NUM_E scl;
+    TUYA_GPIO_NUM_E sda;
+} i2c_pin_t;
+
+static const i2c_pin_t i2c_hw_pin[GD32_I2C_NUM] = {
+    {TUYA_GPIO_NUM_2,  TUYA_GPIO_NUM_3},
+    {TUYA_GPIO_NUM_15, TUYA_GPIO_NUM_8},
+};
+
+static i2c_pin_t i2c_pin[GD32_I2C_NUM] = {
+    {TUYA_GPIO_NUM_2,  TUYA_GPIO_NUM_3},
+    {TUYA_GPIO_NUM_15, TUYA_GPIO_NUM_8},
+};
+
+static uint8_t  i2c_soft[GD32_I2C_NUM]       = {0};
+static uint32_t i2c_soft_delay[GD32_I2C_NUM] = {0};
+
+/* set whenever a transfer ends badly, so the next one starts by freeing the bus */
+static uint8_t  i2c_need_recover[GD32_I2C_NUM] = {0};
+
+/* speed the port was opened with, so a recovery can rebuild the timing registers */
+static TUYA_IIC_SPEED_E i2c_speed[GD32_I2C_NUM] = {TUYA_IIC_BUS_SPEED_100K, TUYA_IIC_BUS_SPEED_100K};
+
+/*
+ * One lock per port. A transfer is a sequence - reset the controller, load the address,
+ * push the bytes, wait for the stop - and a second thread stepping into the middle of
+ * it corrupts both. Created on first init and kept for the life of the program, so
+ * deinit followed by init never races against a caller still holding it.
+ */
+static TKL_MUTEX_HANDLE i2c_lock[GD32_I2C_NUM] = {NULL};
+
+static OPERATE_RET i2c_lock_get(TUYA_I2C_NUM_E port)
+{
+    if (i2c_lock[port] == NULL) {
+        return OPRT_OK;     /* not initialised yet, nothing to serialise against */
+    }
+
+    return tkl_mutex_lock(i2c_lock[port]);
+}
+
+static void i2c_lock_put(TUYA_I2C_NUM_E port)
+{
+    if (i2c_lock[port] != NULL) {
+        tkl_mutex_unlock(i2c_lock[port]);
+    }
+}
+
+/* half bit times: 5 us gives ~100 kHz, 1 us tops out around 400 kHz once the GPIO
+ * write overhead is counted */
+#define I2C_SOFT_DELAY_100K     5
+#define I2C_SOFT_DELAY_FAST     1
+
+/* how long to let a slave stretch the clock, in half bit times */
+#define I2C_SOFT_STRETCH_LIMIT  1000
+
+/*
+ * Every hardware transfer below polls a status flag. Without a bound, a bus that never
+ * answers - nothing wired up, missing pull-ups, wrong address, a slave holding the
+ * line - hangs the calling thread for good, with no log to say why. Spin at most this
+ * many times before giving up; at ~160 MHz it works out to a few milliseconds, far
+ * longer than any 100 kHz byte needs.
+ */
+#define I2C_HW_WAIT_LIMIT       200000U
+
+/* wait for `expr` to become true, or bail out of the enclosing function */
+#define I2C_WAIT_OR_FAIL(expr, err)                     \
+    do {                                                \
+        uint32_t __guard = I2C_HW_WAIT_LIMIT;           \
+        while (!(expr)) {                               \
+            if (__guard-- == 0) {                       \
+                return (err);                           \
+            }                                           \
+        }                                               \
+    } while (0)
+
+/* same, but give up immediately when the slave does not acknowledge - waiting out the
+ * full timeout for a device that is not on the bus just wastes milliseconds */
+#define I2C_WAIT_OR_NACK(periph, expr, err)                             \
+    do {                                                               \
+        uint32_t __guard = I2C_HW_WAIT_LIMIT;                          \
+        while (!(expr)) {                                              \
+            if (i2c_flag_get((periph), I2C_FLAG_NACK)) {               \
+                i2c_flag_clear((periph), I2C_FLAG_NACK);               \
+                i2c_stop_on_bus((periph));                             \
+                return OPRT_OS_ADAPTER_I2C_ADDR_NO_ACK;                  \
+            }                                                          \
+            if (__guard-- == 0) {                                      \
+                return (err);                                          \
+            }                                                          \
+        }                                                              \
+    } while (0)
+
+static void i2c0_gpio_config(void);
+static void i2c1_gpio_config(void);
+
+/**
+ * @brief clear everything an aborted transfer can leave behind
+ */
+static void i2c_error_flags_clear(uint32_t i2c_port)
+{
+    i2c_flag_clear(i2c_port, I2C_FLAG_NACK);
+    i2c_flag_clear(i2c_port, I2C_FLAG_BERR);
+    i2c_flag_clear(i2c_port, I2C_FLAG_LOSTARB);
+    i2c_flag_clear(i2c_port, I2C_FLAG_OUERR);
+    i2c_flag_clear(i2c_port, I2C_FLAG_STPDET);
+}
+
+/**
+ * @brief load the timing registers for a bus speed
+ */
+static void hw_i2c_timing_apply(uint32_t i2c_port, TUYA_IIC_SPEED_E speed)
+{
+    if (speed == TUYA_IIC_BUS_SPEED_100K) {
+        i2c_timing_config(i2c_port, 1, 0xA, 0);
+        i2c_master_clock_config(i2c_port, 0x0, 0xE9);
+    } else if (speed == TUYA_IIC_BUS_SPEED_400K) {
+        i2c_timing_config(i2c_port, 0, 0x8, 0);
+        i2c_master_clock_config(i2c_port, 0x30, 0x91);
+    } else {
+        i2c_timing_config(i2c_port, 0, 0x4, 0);
+        i2c_master_clock_config(i2c_port, 0x14, 0x35);
+    }
+}
+
+/**
+ * @brief put the controller back the way a chip reset would leave it
+ *
+ * Clearing the enable bit only parks the state machine - the timing registers and
+ * whatever the previous transfer latched survive. i2c_deinit() pulses the peripheral
+ * reset line in the RCU, which is what pressing the reset button does, and is the
+ * difference between recovering from a wedged transfer and staying wedged.
+ */
+static void hw_i2c_periph_reset(TUYA_I2C_NUM_E port, uint32_t i2c_port)
+{
+    i2c_deinit(i2c_port);
+
+    if (i2c_port == I2C0) {
+        rcu_periph_clock_enable(RCU_I2C0);
+    } else {
+        rcu_periph_clock_enable(RCU_I2C1);
+    }
+
+    hw_i2c_timing_apply(i2c_port, i2c_speed[port]);
+    i2c_enable(i2c_port);
+}
+
+/**
+ * @brief walk a wedged bus back to idle
+ *
+ * If a transfer dies half way through a byte - a glitch, a reset on our side - the
+ * slave can be left holding SDA low waiting for the rest of its clocks. No amount of
+ * re-initialising the controller fixes that, because the slave, not the master, owns
+ * the line. The way out is to hand the pins to GPIO and clock SCL until the slave
+ * lets go, then place a STOP by hand.
+ */
+static void i2c_bus_recover(TUYA_I2C_NUM_E port)
+{
+    TUYA_GPIO_BASE_CFG_T cfg = {
+        .mode   = TUYA_GPIO_OPENDRAIN_PULLUP,
+        .direct = TUYA_GPIO_OUTPUT,
+        .level  = TUYA_GPIO_LEVEL_HIGH,
+    };
+    TUYA_GPIO_LEVEL_E level = TUYA_GPIO_LEVEL_LOW;
+    uint8_t i;
+
+    tkl_gpio_init(i2c_pin[port].scl, &cfg);
+    tkl_gpio_init(i2c_pin[port].sda, &cfg);
+    tkl_gpio_write(i2c_pin[port].sda, TUYA_GPIO_LEVEL_HIGH);
+    tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_HIGH);
+    sys_us_delay(I2C_SOFT_DELAY_100K);
+
+    /* nine clocks is one byte plus the ack - enough for any slave to finish */
+    for (i = 0; i < 9; i++) {
+        tkl_gpio_read(i2c_pin[port].sda, &level);
+        if (level == TUYA_GPIO_LEVEL_HIGH) {
+            break;
+        }
+        tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_LOW);
+        sys_us_delay(I2C_SOFT_DELAY_100K);
+        tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_HIGH);
+        sys_us_delay(I2C_SOFT_DELAY_100K);
+    }
+
+    /* STOP: sda rises while scl is high */
+    tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_LOW);
+    tkl_gpio_write(i2c_pin[port].sda, TUYA_GPIO_LEVEL_LOW);
+    sys_us_delay(I2C_SOFT_DELAY_100K);
+    tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_HIGH);
+    sys_us_delay(I2C_SOFT_DELAY_100K);
+    tkl_gpio_write(i2c_pin[port].sda, TUYA_GPIO_LEVEL_HIGH);
+    sys_us_delay(I2C_SOFT_DELAY_100K);
+
+    /* give the pins back to the controller */
+    if (port == TUYA_I2C_NUM_0) {
+        i2c0_gpio_config();
+    } else {
+        i2c1_gpio_config();
+    }
+}
+
+/**
+ * @brief are both lines released?
+ *
+ * The input stage stays alive while a pin is in alternate function mode, so the real
+ * level can be read without disturbing the controller. A slave stuck part way through
+ * a byte shows up here as sda held low - something no status flag in the controller
+ * reports, since as far as it is concerned nothing is going on.
+ */
+static int i2c_bus_is_idle(TUYA_I2C_NUM_E port)
+{
+    TUYA_GPIO_LEVEL_E scl = TUYA_GPIO_LEVEL_HIGH;
+    TUYA_GPIO_LEVEL_E sda = TUYA_GPIO_LEVEL_HIGH;
+
+    tkl_gpio_read(i2c_pin[port].scl, &scl);
+    tkl_gpio_read(i2c_pin[port].sda, &sda);
+
+    return (scl == TUYA_GPIO_LEVEL_HIGH) && (sda == TUYA_GPIO_LEVEL_HIGH);
+}
+
+/**
+ * @brief arm one master transfer: target address, direction, length and stop behaviour
+ *
+ * With automatic end enabled the controller issues the STOP itself once NBYTES have
+ * moved; xfer_pending keeps it off so the caller can chain a repeated start.
+ */
+static OPERATE_RET i2c_master_xfer_setup(TUYA_I2C_NUM_E port, uint32_t i2c_port, uint16_t dev_addr,
+                                         uint32_t size, uint32_t direction, BOOL_T xfer_pending)
+{
+    uint32_t guard;
+    uint8_t attempt;
+
+    if (size > 0xFF) {
+        /* NBYTES is a single byte; longer transfers would need the reload mechanism */
+        return OPRT_INVALID_PARM;
+    }
+
+    /* A slave knocked off the rails does not answer its address any more, and the
+     * controller has no flag for that - it just reports NACK for ever. Clock the bus
+     * free after any failed transfer, and whenever a line is found stuck low. */
+    if (i2c_need_recover[port] || !i2c_bus_is_idle(port)) {
+        /* free the lines first, then rebuild the controller from scratch - clearing
+         * the enable bit alone leaves too much of the failed transfer behind */
+        i2c_bus_recover(port);
+        hw_i2c_periph_reset(port, i2c_port);
+        i2c_need_recover[port] = 0;
+    }
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        i2c_disable(i2c_port);
+        i2c_enable(i2c_port);
+        i2c_error_flags_clear(i2c_port);
+
+        guard = I2C_HW_WAIT_LIMIT;
+        while (i2c_flag_get(i2c_port, I2C_FLAG_I2CBSY)) {
+            if (guard-- == 0) {
+                break;
+            }
+        }
+
+        if (!i2c_flag_get(i2c_port, I2C_FLAG_I2CBSY)) {
+            break;
+        }
+
+        /* Still busy: something outside the controller is holding the bus down. Try a
+         * recovery once, then give up rather than reporting BUSY for ever - this is
+         * exactly the state a single corrupted transfer used to get stuck in. */
+        if (attempt == 0) {
+            i2c_bus_recover(port);
+            hw_i2c_periph_reset(port, i2c_port);
+        } else {
+            return OPRT_OS_ADAPTER_I2C_BUSY;
+        }
+    }
+
+    /* SADDRESS holds the 7-bit address left aligned, the r/w bit occupies bit 0 */
+    i2c_master_addressing(i2c_port, (uint32_t)dev_addr << 1, direction);
+    i2c_transfer_byte_number_config(i2c_port, size);
+
+    if (xfer_pending) {
+        i2c_automatic_end_disable(i2c_port);
+    } else {
+        i2c_automatic_end_enable(i2c_port);
+    }
+
+    i2c_start_on_bus(i2c_port);
+
+    return OPRT_OK;
+}
+
+/**
+ * @brief close out a master transfer
+ */
+static OPERATE_RET i2c_master_xfer_finish(uint32_t i2c_port, BOOL_T xfer_pending, OPERATE_RET err)
+{
+    if (xfer_pending) {
+        /* no stop: TC means the byte count is done and a repeated start may follow */
+        I2C_WAIT_OR_NACK(i2c_port, i2c_flag_get(i2c_port, I2C_FLAG_TC), err);
+        return OPRT_OK;
+    }
+
+    /* automatic end drives the stop for us, just wait for it to land */
+    I2C_WAIT_OR_NACK(i2c_port, i2c_flag_get(i2c_port, I2C_FLAG_STPDET), err);
+    i2c_flag_clear(i2c_port, I2C_FLAG_STPDET);
+
+    return OPRT_OK;
+}
+
+/**
+ * @brief record the scl pin chosen through tkl_io_pinmux_config
+ */
+void __tkl_i2c_set_scl_pin(TUYA_I2C_NUM_E port, TUYA_PIN_NAME_E scl_pin)
+{
+    if (port < GD32_I2C_NUM) {
+        i2c_pin[port].scl = (TUYA_GPIO_NUM_E)scl_pin;
+    }
+}
+
+/**
+ * @brief record the sda pin chosen through tkl_io_pinmux_config
+ */
+void __tkl_i2c_set_sda_pin(TUYA_I2C_NUM_E port, TUYA_PIN_NAME_E sda_pin)
+{
+    if (port < GD32_I2C_NUM) {
+        i2c_pin[port].sda = (TUYA_GPIO_NUM_E)sda_pin;
+    }
+}
+
+static int i2c_pins_are_hardware(TUYA_I2C_NUM_E port)
+{
+    return (i2c_pin[port].scl == i2c_hw_pin[port].scl) &&
+           (i2c_pin[port].sda == i2c_hw_pin[port].sda);
+}
+
+/* ---- bit-banged master ------------------------------------------------------
+ * Both lines stay open-drain the whole time: writing 1 releases the line and lets
+ * the pull-up raise it, writing 0 drives it low. Reading works in that state too,
+ * so sda never has to be flipped between input and output. */
+
+static void sw_delay(TUYA_I2C_NUM_E port)
+{
+    sys_us_delay(i2c_soft_delay[port]);
+}
+
+static void sw_sda(TUYA_I2C_NUM_E port, uint8_t high)
+{
+    tkl_gpio_write(i2c_pin[port].sda, high ? TUYA_GPIO_LEVEL_HIGH : TUYA_GPIO_LEVEL_LOW);
+}
+
+static uint8_t sw_sda_read(TUYA_I2C_NUM_E port)
+{
+    TUYA_GPIO_LEVEL_E level = TUYA_GPIO_LEVEL_LOW;
+
+    tkl_gpio_read(i2c_pin[port].sda, &level);
+
+    return (level == TUYA_GPIO_LEVEL_HIGH) ? 1 : 0;
+}
+
+/* release scl and wait for it to actually rise - a slave may be stretching */
+static void sw_scl_high(TUYA_I2C_NUM_E port)
+{
+    TUYA_GPIO_LEVEL_E level = TUYA_GPIO_LEVEL_LOW;
+    uint32_t guard = I2C_SOFT_STRETCH_LIMIT;
+
+    tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_HIGH);
+    sw_delay(port);
+
+    while (guard--) {
+        tkl_gpio_read(i2c_pin[port].scl, &level);
+        if (level == TUYA_GPIO_LEVEL_HIGH) {
+            break;
+        }
+        sw_delay(port);
+    }
+}
+
+static void sw_scl_low(TUYA_I2C_NUM_E port)
+{
+    tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_LOW);
+    sw_delay(port);
+}
+
+static void sw_start(TUYA_I2C_NUM_E port)
+{
+    sw_sda(port, 1);
+    sw_scl_high(port);
+    sw_sda(port, 0);
+    sw_delay(port);
+    sw_scl_low(port);
+}
+
+static void sw_stop(TUYA_I2C_NUM_E port)
+{
+    sw_sda(port, 0);
+    sw_delay(port);
+    sw_scl_high(port);
+    sw_sda(port, 1);
+    sw_delay(port);
+}
+
+/* returns 1 when the slave acknowledged */
+static uint8_t sw_write_byte(TUYA_I2C_NUM_E port, uint8_t data)
+{
+    uint8_t i, ack;
+
+    for (i = 0; i < 8; i++) {
+        sw_sda(port, (data & 0x80) ? 1 : 0);
+        data <<= 1;
+        sw_delay(port);
+        sw_scl_high(port);
+        sw_scl_low(port);
+    }
+
+    /* release sda so the slave can pull it down for the ack bit */
+    sw_sda(port, 1);
+    sw_delay(port);
+    sw_scl_high(port);
+    ack = sw_sda_read(port) ? 0 : 1;
+    sw_scl_low(port);
+
+    return ack;
+}
+
+static uint8_t sw_read_byte(TUYA_I2C_NUM_E port, uint8_t ack)
+{
+    uint8_t i, data = 0;
+
+    sw_sda(port, 1);
+
+    for (i = 0; i < 8; i++) {
+        data <<= 1;
+        sw_scl_high(port);
+        if (sw_sda_read(port)) {
+            data |= 1;
+        }
+        sw_scl_low(port);
+    }
+
+    /* ack pulls sda low, nak leaves it released */
+    sw_sda(port, ack ? 0 : 1);
+    sw_delay(port);
+    sw_scl_high(port);
+    sw_scl_low(port);
+    sw_sda(port, 1);
+
+    return data;
+}
+
+static OPERATE_RET sw_i2c_init(TUYA_I2C_NUM_E port)
+{
+    TUYA_GPIO_BASE_CFG_T cfg = {
+        .mode      = TUYA_GPIO_OPENDRAIN_PULLUP,
+        .direct    = TUYA_GPIO_OUTPUT,
+        .level     = TUYA_GPIO_LEVEL_HIGH,
+    };
+    OPERATE_RET rt;
+
+    rt = tkl_gpio_init(i2c_pin[port].scl, &cfg);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+
+    rt = tkl_gpio_init(i2c_pin[port].sda, &cfg);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+
+    /* both lines idle high */
+    tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_HIGH);
+    tkl_gpio_write(i2c_pin[port].sda, TUYA_GPIO_LEVEL_HIGH);
+
+    return OPRT_OK;
+}
+
+static OPERATE_RET sw_i2c_master_send(TUYA_I2C_NUM_E port, uint16_t dev_addr, const uint8_t *data,
+                                      uint32_t size, BOOL_T xfer_pending)
+{
+    uint32_t i;
+
+    i2c_xfer_count[port] = 0;
+
+    sw_start(port);
+
+    if (!sw_write_byte(port, (uint8_t)((dev_addr << 1) & 0xFE))) {
+        sw_stop(port);
+        return OPRT_OS_ADAPTER_I2C_ADDR_NO_ACK;
+    }
+
+    for (i = 0; i < size; i++) {
+        if (!sw_write_byte(port, data[i])) {
+            sw_stop(port);
+            return OPRT_OS_ADAPTER_I2C_WRITE_FAILED;
+        }
+        i2c_xfer_count[port]++;
+    }
+
+    if (!xfer_pending) {
+        sw_stop(port);
+    }
+
+    return OPRT_OK;
+}
+
+static OPERATE_RET sw_i2c_master_receive(TUYA_I2C_NUM_E port, uint16_t dev_addr, uint8_t *data,
+                                         uint32_t size, BOOL_T xfer_pending)
+{
+    uint32_t i;
+
+    i2c_xfer_count[port] = 0;
+
+    sw_start(port);
+
+    if (!sw_write_byte(port, (uint8_t)(((dev_addr << 1) & 0xFE) | 0x01))) {
+        sw_stop(port);
+        return OPRT_OS_ADAPTER_I2C_ADDR_NO_ACK;
+    }
+
+    for (i = 0; i < size; i++) {
+        /* ack every byte except the last one */
+        data[i] = sw_read_byte(port, (i + 1 < size) ? 1 : 0);
+        i2c_xfer_count[port]++;
+    }
+
+    if (!xfer_pending) {
+        sw_stop(port);
+    }
+
+    return OPRT_OK;
+}
 
 static uint32_t i2c_port_transfer(TUYA_I2C_NUM_E port)
 {
@@ -124,7 +701,7 @@ BOOL_T i2c_irq_callback_register(uint32_t i2c_port, TUYA_I2C_IRQ_CB callback)
 {
     uint8_t i;
 
-    for (i = 0; i < TUYA_I2C_NUM_MAX; i++) {
+    for (i = 0; i < GD32_I2C_NUM; i++) {
         // uart port already register callback
         if (i2c_irq_mgr.i2c_irq_cbs[i].i2c_port == i2c_port || \
             i2c_irq_mgr.i2c_irq_cbs[i].i2c_port == 0) {
@@ -142,7 +719,7 @@ void i2c_irq_hdl(uint32_t i2c_port)
     uint8_t i;
     TUYA_IIC_IRQ_EVT_E irq_event;
 
-    for (i = 0; i < TUYA_I2C_NUM_MAX; i++) {
+    for (i = 0; i < GD32_I2C_NUM; i++) {
         if (i2c_irq_mgr.i2c_irq_cbs[i].i2c_port == i2c_port) {
             irq_event = i2c_irq_source_get(i2c_port);
             i2c_irq_mgr.i2c_irq_cbs[i].callback(i2c_port, irq_event);
@@ -189,33 +766,62 @@ static void i2c1_gpio_config(void)
 OPERATE_RET tkl_i2c_init(TUYA_I2C_NUM_E port, const TUYA_IIC_BASE_CFG_T *cfg)
 {
     // --- BEGIN: user implements ---
-    uint32_t i2c_port = i2c_port_transfer(port);
+    uint32_t i2c_port;
+
+    if (port >= GD32_I2C_NUM || cfg == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (i2c_lock[port] == NULL) {
+        OPERATE_RET lock_rt = tkl_mutex_create_init(&i2c_lock[port]);
+        if (lock_rt != OPRT_OK) {
+            return lock_rt;
+        }
+    }
+
+    /* pins moved off the controller by tkl_io_pinmux_config: bit-bang them instead */
+    if (!i2c_pins_are_hardware(port)) {
+        if (cfg->role == TUYA_IIC_MODE_SLAVE) {
+            /* a bit-banged slave would have to poll fast enough to catch its own
+             * address, which is not something this driver can promise */
+            return OPRT_NOT_SUPPORTED;
+        }
+        if (cfg->addr_width != TUYA_IIC_ADDRESS_7BIT) {
+            return OPRT_NOT_SUPPORTED;
+        }
+
+        i2c_soft_delay[port] = (cfg->speed == TUYA_IIC_BUS_SPEED_100K) ? I2C_SOFT_DELAY_100K
+                                                                      : I2C_SOFT_DELAY_FAST;
+        i2c_soft[port] = 1;
+
+        return sw_i2c_init(port);
+    }
+
+    i2c_soft[port] = 0;
+    i2c_port = i2c_port_transfer(port);
 
     /* enable GPIOA clock */
     rcu_periph_clock_enable(RCU_GPIOA);
-    /* enable I2C1 clock */
-    rcu_periph_clock_enable(RCU_I2C1);
 
+    /* Clock the controller actually being used. This used to enable RCU_I2C1
+     * unconditionally, so I2C0 ran with its clock gated off: every register read came
+     * back as zero and the first "wait for flag" loop in master_send() never exited. */
     if (i2c_port == I2C0) {
+        rcu_periph_clock_enable(RCU_I2C0);
         i2c0_gpio_config();
     } else if (i2c_port == I2C1) {
+        rcu_periph_clock_enable(RCU_I2C1);
         i2c1_gpio_config();
     } else {
         return OPRT_OS_ADAPTER_I2C_INVALID_PARM;
     }
 
-    if (cfg->speed == TUYA_IIC_BUS_SPEED_100K) {
-        i2c_timing_config(i2c_port, 1, 0xA, 0);
-        i2c_master_clock_config(i2c_port, 0x0, 0xE9);
-    } else if (cfg->speed == TUYA_IIC_BUS_SPEED_400K) {
-        i2c_timing_config(i2c_port, 0, 0x8, 0);
-        i2c_master_clock_config(i2c_port, 0x30, 0x91);
-    } else if (cfg->speed == TUYA_IIC_BUS_SPEED_1M) {
-        i2c_timing_config(i2c_port, 0, 0x4, 0);
-        i2c_master_clock_config(i2c_port, 0x14, 0x35);
-    } else if (cfg->speed == TUYA_IIC_BUS_SPEED_3_4M) {
+    if (cfg->speed == TUYA_IIC_BUS_SPEED_3_4M) {
         return OPRT_OS_ADAPTER_I2C_INVALID_PARM;
     }
+
+    i2c_speed[port] = cfg->speed;
+    hw_i2c_timing_apply(i2c_port, cfg->speed);
 
     if (cfg->addr_width == TUYA_IIC_ADDRESS_7BIT) {
         addr_width = 7;
@@ -237,6 +843,23 @@ OPERATE_RET tkl_i2c_init(TUYA_I2C_NUM_E port, const TUYA_IIC_BASE_CFG_T *cfg)
 OPERATE_RET tkl_i2c_deinit(TUYA_I2C_NUM_E port)
 {
     // --- BEGIN: user implements ---
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
+
+    /* an unfinished pending transaction would otherwise leave the vote held for good */
+    i2c_busy_release(port);
+
+    if (i2c_soft[port]) {
+        /* leave both lines released so the bus is not held down */
+        tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_HIGH);
+        tkl_gpio_write(i2c_pin[port].sda, TUYA_GPIO_LEVEL_HIGH);
+        tkl_gpio_deinit(i2c_pin[port].scl);
+        tkl_gpio_deinit(i2c_pin[port].sda);
+        i2c_soft[port] = 0;
+        return OPRT_OK;
+    }
+
     i2c_deinit(i2c_port_transfer(port));
     return OPRT_OK;
     // --- END: user implements ---
@@ -254,6 +877,9 @@ OPERATE_RET tkl_i2c_deinit(TUYA_I2C_NUM_E port)
 OPERATE_RET tkl_i2c_irq_init(TUYA_I2C_NUM_E port, TUYA_I2C_IRQ_CB cb)
 {
     // --- BEGIN: user implements ---
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
     if (i2c_irq_callback_register(i2c_port_transfer(port), cb))
         return OPRT_OK;
 
@@ -271,6 +897,9 @@ OPERATE_RET tkl_i2c_irq_init(TUYA_I2C_NUM_E port, TUYA_I2C_IRQ_CB cb)
 OPERATE_RET tkl_i2c_irq_enable(TUYA_I2C_NUM_E port)
 {
     // --- BEGIN: user implements ---
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
     i2c_interrupt_enable(i2c_port_transfer(port), I2C_INT_ERR | I2C_INT_TC | \
                                               I2C_INT_STPDET | I2C_INT_NACK | \
                                               I2C_INT_ADDM | I2C_INT_RBNE | \
@@ -290,6 +919,9 @@ OPERATE_RET tkl_i2c_irq_enable(TUYA_I2C_NUM_E port)
 OPERATE_RET tkl_i2c_irq_disable(TUYA_I2C_NUM_E port)
 {
     // --- BEGIN: user implements ---
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
     i2c_interrupt_disable(i2c_port_transfer(port), I2C_INT_ERR | I2C_INT_TC | \
                                             I2C_INT_STPDET | I2C_INT_NACK | \
                                             I2C_INT_ADDM | I2C_INT_RBNE | \
@@ -308,54 +940,75 @@ OPERATE_RET tkl_i2c_irq_disable(TUYA_I2C_NUM_E port)
  * @param[in] xfer_pending: xfer_pending: TRUE : not send stop condition, FALSE : send stop condition.
  * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
  */
+static OPERATE_RET hw_i2c_master_send(TUYA_I2C_NUM_E port, uint16_t dev_addr, const void *data,
+                                      uint32_t size, BOOL_T xfer_pending)
+{
+    uint32_t i2c_port = i2c_port_transfer(port);
+    const uint8_t *tx = (const uint8_t *)data;
+    uint32_t i;
+    OPERATE_RET rt;
+
+    if (addr_width != 7) {
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    rt = i2c_master_xfer_setup(port, i2c_port, dev_addr, size, I2C_MASTER_TRANSMIT, xfer_pending);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+
+    i2c_xfer_count[port] = 0;
+    for (i = 0; i < size; i++) {
+        /* TBE says the data register is free; a NACK here means nobody is listening */
+        I2C_WAIT_OR_NACK(i2c_port, i2c_flag_get(i2c_port, I2C_FLAG_TBE),
+                         OPRT_OS_ADAPTER_I2C_WRITE_FAILED);
+        i2c_data_transmit(i2c_port, tx[i]);
+        i2c_xfer_count[port]++;
+    }
+
+    return i2c_master_xfer_finish(i2c_port, xfer_pending, OPRT_OS_ADAPTER_I2C_WRITE_FAILED);
+}
+
+/**
+ * @brief i2c master send
+ *
+ * @param[in] port: i2c port
+ * @param[in] dev_addr: iic addrress of slave device.
+ * @param[in] data: i2c data to send
+ * @param[in] size: Number of data items to send
+ * @param[in] xfer_pending: TRUE : not send stop condition, FALSE : send stop condition.
+ * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
+ */
 OPERATE_RET tkl_i2c_master_send(TUYA_I2C_NUM_E port, uint16_t dev_addr, const void *data, uint32_t size,
                                 BOOL_T xfer_pending)
 {
     // --- BEGIN: user implements ---
-    uint32_t i2c_port = i2c_port_transfer(port);
-    uint8_t i;
-    uint32_t *data_transmit = (uint32_t *)data;
+    OPERATE_RET rt;
 
-
-    if (addr_width == 10) {
-        /* enable 10-bit addressing mode in master mode */
-        i2c_address10_enable(i2c_port);
-        /* configure I2C address */
-        i2c_address_config(i2c_port, dev_addr, I2C_ADDFORMAT_10BITS);
-    } else if (addr_width == 7) {
-        /* configure I2C address */
-        i2c_address_config(i2c_port, dev_addr, I2C_ADDFORMAT_7BITS);
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
     }
 
-    i2c_transfer_byte_number_config(i2c_port, size);
-    /* enable I2C */
-    i2c_enable(i2c_port);
+    i2c_lock_get(port);
+    i2c_busy_hold(port);
 
-    /* wait until I2C bus is idle */
-    while(i2c_flag_get(i2c_port, I2C_FLAG_I2CBSY));
-    /* send a start condition to I2C bus */
-    i2c_start_on_bus(i2c_port);
-    /* wait until the transmit data buffer is empty */
-    I2C_STAT(i2c_port) |= I2C_STAT_TBE;
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_TBE));
-
-    for (i = 0; i < size; i++) {
-        /* data transmission */
-        i2c_data_transmit(i2c_port, data_transmit[i]);
-        /* wait until the TI bit is set */
-        while(!i2c_flag_get(i2c_port, I2C_FLAG_TI));
+    if (i2c_soft[port]) {
+        rt = sw_i2c_master_send(port, dev_addr, (const uint8_t *)data, size, xfer_pending);
+    } else {
+        rt = hw_i2c_master_send(port, dev_addr, data, size, xfer_pending);
+        if (rt != OPRT_OK) {
+            /* leave a note so the next transfer clocks the bus free first */
+            i2c_need_recover[port] = 1;
+        }
     }
 
-    /* wait for transfer complete flag */
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_TC));
-    /* send a stop condition to I2C bus */
-    i2c_stop_on_bus(i2c_port);
-    /* wait until stop condition generate */
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_STPDET));
-    /* clear the STPDET bit */
-    i2c_flag_clear(i2c_port, I2C_FLAG_STPDET);
+    if (!xfer_pending || rt != OPRT_OK) {
+        i2c_busy_release(port);
+    }
 
-    return OPRT_OK;
+    i2c_lock_put(port);
+
+    return rt;
     // --- END: user implements ---
 }
 
@@ -369,50 +1022,73 @@ OPERATE_RET tkl_i2c_master_send(TUYA_I2C_NUM_E port, uint16_t dev_addr, const vo
  * @param[in] xfer_pending: TRUE : not send stop condition, FALSE : send stop condition.
  * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
  */
+static OPERATE_RET hw_i2c_master_receive(TUYA_I2C_NUM_E port, uint16_t dev_addr, void *data,
+                                         uint32_t size, BOOL_T xfer_pending)
+{
+    uint32_t i2c_port = i2c_port_transfer(port);
+    uint8_t *rx = (uint8_t *)data;
+    uint32_t i;
+    OPERATE_RET rt;
+
+    if (addr_width != 7) {
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    rt = i2c_master_xfer_setup(port, i2c_port, dev_addr, size, I2C_MASTER_RECEIVE, xfer_pending);
+    if (rt != OPRT_OK) {
+        return rt;
+    }
+
+    i2c_xfer_count[port] = 0;
+    for (i = 0; i < size; i++) {
+        I2C_WAIT_OR_NACK(i2c_port, i2c_flag_get(i2c_port, I2C_FLAG_RBNE),
+                         OPRT_OS_ADAPTER_I2C_READ_FAILED);
+        rx[i] = (uint8_t)i2c_data_receive(i2c_port);
+        i2c_xfer_count[port]++;
+    }
+
+    return i2c_master_xfer_finish(i2c_port, xfer_pending, OPRT_OS_ADAPTER_I2C_READ_FAILED);
+}
+
+/**
+ * @brief i2c master receive
+ *
+ * @param[in] port: i2c port
+ * @param[in] dev_addr: iic addrress of slave device.
+ * @param[out] data: i2c receive buffer
+ * @param[in] size: Number of data items to receive
+ * @param[in] xfer_pending: TRUE : not send stop condition, FALSE : send stop condition.
+ * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
+ */
 OPERATE_RET tkl_i2c_master_receive(TUYA_I2C_NUM_E port, uint16_t dev_addr, void *data, uint32_t size,
                                    BOOL_T xfer_pending)
 {
     // --- BEGIN: user implements ---
-    uint32_t i2c_port = i2c_port_transfer(port);
-    uint8_t i;
-    uint32_t *data_receive = (uint32_t *)data;
+    OPERATE_RET rt;
 
-    if (addr_width == 10) {
-        /* enable 10-bit addressing mode in master mode */
-        i2c_address10_enable(i2c_port);
-        /* configure I2C address */
-        i2c_address_config(i2c_port, dev_addr, I2C_ADDFORMAT_10BITS);
-    } else if (addr_width == 7) {
-        /* configure I2C address */
-        i2c_address_config(i2c_port, dev_addr, I2C_ADDFORMAT_7BITS);
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
     }
 
-    /* configure slave address */
-    i2c_master_addressing(i2c_port, dev_addr, I2C_MASTER_RECEIVE);
-    i2c_transfer_byte_number_config(i2c_port, size);
-    /* enable I2C */
-    i2c_enable(i2c_port);
+    i2c_lock_get(port);
+    i2c_busy_hold(port);
 
-    /* wait until I2C bus is idle */
-    while(i2c_flag_get(i2c_port, I2C_FLAG_I2CBSY));
-    /* send a start condition to I2C bus */
-    i2c_start_on_bus(i2c_port);
-
-    for (i = 0; i < size; i++) {
-        /* wait until the RBNE bit is set */
-        while(!i2c_flag_get(i2c_port, I2C_FLAG_RBNE));
-        /* read a data from I2C_DATA */
-        data_receive[i] = i2c_data_receive(i2c_port);
+    if (i2c_soft[port]) {
+        rt = sw_i2c_master_receive(port, dev_addr, (uint8_t *)data, size, xfer_pending);
+    } else {
+        rt = hw_i2c_master_receive(port, dev_addr, data, size, xfer_pending);
+        if (rt != OPRT_OK) {
+            i2c_need_recover[port] = 1;
+        }
     }
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_TC));
-    /* send a stop condition to I2C bus */
-    i2c_stop_on_bus(i2c_port);
-    /* wait until stop condition generate */
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_STPDET));
-    /* clear the STPDET bit */
-    i2c_flag_clear(i2c_port, I2C_FLAG_STPDET);
 
-    return OPRT_OK;
+    if (!xfer_pending || rt != OPRT_OK) {
+        i2c_busy_release(port);
+    }
+
+    i2c_lock_put(port);
+
+    return rt;
     // --- END: user implements ---
 }
 
@@ -427,6 +1103,9 @@ OPERATE_RET tkl_i2c_master_receive(TUYA_I2C_NUM_E port, uint16_t dev_addr, void 
 OPERATE_RET tkl_i2c_set_slave_addr(TUYA_I2C_NUM_E port, uint16_t dev_addr)
 {
     // --- BEGIN: user implements ---
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
     uint32_t i2c_port = i2c_port_transfer(port);
 
     if (addr_width == 10) {
@@ -452,41 +1131,71 @@ OPERATE_RET tkl_i2c_set_slave_addr(TUYA_I2C_NUM_E port, uint16_t dev_addr)
  * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
  */
 
-OPERATE_RET tkl_i2c_slave_send(TUYA_I2C_NUM_E port, const void *data, uint32_t size)
+static OPERATE_RET hw_i2c_slave_send(TUYA_I2C_NUM_E port, const void *data, uint32_t size)
 {
-    // --- BEGIN: user implements ---
     uint32_t i2c_port = i2c_port_transfer(port);
-    uint8_t i;
-    uint32_t *data_transmit = (uint32_t *)data;
+    const uint8_t *data_transmit = (const uint8_t *)data;
+    uint32_t i;
 
     /* enable I2C1 */
     i2c_enable(i2c_port);
 
     /* wait until ADDSEND bit is set */
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_ADDSEND));
+    I2C_WAIT_OR_FAIL(i2c_flag_get(i2c_port, I2C_FLAG_ADDSEND), OPRT_OS_ADAPTER_I2C_READ_FAILED);
     /* clear ADDSEND bit */
     i2c_flag_clear(i2c_port, I2C_FLAG_ADDSEND);
     if (addr_width == 10) {
         /* wait until ADDSEND bit is set */
-        while(!i2c_flag_get(i2c_port, I2C_FLAG_ADDSEND));
+        I2C_WAIT_OR_FAIL(i2c_flag_get(i2c_port, I2C_FLAG_ADDSEND), OPRT_OS_ADAPTER_I2C_READ_FAILED);
         i2c_flag_clear(i2c_port, I2C_FLAG_ADDSEND);
     }
     I2C_STAT(i2c_port) |= I2C_STAT_TBE;
     /* wait until the transmission data register is empty */
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_TBE));
+    I2C_WAIT_OR_FAIL(i2c_flag_get(i2c_port, I2C_FLAG_TBE), OPRT_OS_ADAPTER_I2C_WRITE_FAILED);
 
+    i2c_xfer_count[port] = 0;
     for (i = 0; i < size; i++) {
         /* send a data byte */
         i2c_data_transmit(i2c_port, data_transmit[i]);
         /* wait until the transmission data register is empty */
-        while(!i2c_flag_get(i2c_port, I2C_FLAG_TI));
+        I2C_WAIT_OR_FAIL(i2c_flag_get(i2c_port, I2C_FLAG_TI), OPRT_OS_ADAPTER_I2C_WRITE_FAILED);
+        i2c_xfer_count[port]++;
     }
     /* wait until stop condition generate */
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_STPDET));
+    I2C_WAIT_OR_FAIL(i2c_flag_get(i2c_port, I2C_FLAG_STPDET), OPRT_OS_ADAPTER_I2C_WRITE_FAILED);
     /* clear the STPDET bit */
     i2c_flag_clear(i2c_port, I2C_FLAG_STPDET);
 
     return OPRT_OK;
+}
+
+/**
+ * @brief IIC slave send, Start sending data as IIC Slave.
+ *
+ * @param[in] port: i2c port
+ * @param[in] data: i2c data to send
+ * @param[in] size: Number of data items to send
+ * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
+ */
+OPERATE_RET tkl_i2c_slave_send(TUYA_I2C_NUM_E port, const void *data, uint32_t size)
+{
+    // --- BEGIN: user implements ---
+    OPERATE_RET rt;
+
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (i2c_soft[port]) {
+        /* the bit-banged master cannot act as a slave */
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    i2c_lock_get(port);
+    rt = hw_i2c_slave_send(port, data, size);
+    i2c_lock_put(port);
+
+    return rt;
     // --- END: user implements ---
 }
 
@@ -499,33 +1208,60 @@ OPERATE_RET tkl_i2c_slave_send(TUYA_I2C_NUM_E port, const void *data, uint32_t s
  * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
  */
 
-OPERATE_RET tkl_i2c_slave_receive(TUYA_I2C_NUM_E port, void *data, uint32_t size)
+static OPERATE_RET hw_i2c_slave_receive(TUYA_I2C_NUM_E port, void *data, uint32_t size)
 {
-    // --- BEGIN: user implements ---
     uint32_t i2c_port = i2c_port_transfer(port);
-    uint8_t i;
-    uint32_t *data_receive = (uint32_t *)data;
+    uint8_t *data_receive = (uint8_t *)data;
+    uint32_t i;
 
     /* enable I2C1 */
     i2c_enable(i2c_port);
     /* wait until ADDSEND bit is set */
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_ADDSEND));
+    I2C_WAIT_OR_FAIL(i2c_flag_get(i2c_port, I2C_FLAG_ADDSEND), OPRT_OS_ADAPTER_I2C_READ_FAILED);
     /* clear ADDSEND bit */
     i2c_flag_clear(i2c_port, I2C_FLAG_ADDSEND);
+    i2c_xfer_count[port] = 0;
     for (i = 0; i < size; i++) {
         /* wait until the RBNE bit is set */
-        while(!i2c_flag_get(i2c_port, I2C_FLAG_RBNE));
+        I2C_WAIT_OR_FAIL(i2c_flag_get(i2c_port, I2C_FLAG_RBNE), OPRT_OS_ADAPTER_I2C_READ_FAILED);
         /* read a data byte from I2C_RDATA */
-        data_receive[i] = i2c_data_receive(i2c_port);
+        data_receive[i] = (uint8_t)i2c_data_receive(i2c_port);
+        i2c_xfer_count[port]++;
     }
     /* wait until the STPDET bit is set */
-    while(!i2c_flag_get(i2c_port, I2C_FLAG_STPDET));
+    I2C_WAIT_OR_FAIL(i2c_flag_get(i2c_port, I2C_FLAG_STPDET), OPRT_OS_ADAPTER_I2C_WRITE_FAILED);
     /* clear the STPDET bit */
     i2c_flag_clear(i2c_port, I2C_FLAG_STPDET);
 
-
-
     return OPRT_OK;
+}
+
+/**
+ * @brief IIC slave receive, Start receiving data as IIC Slave.
+ *
+ * @param[in] port: i2c port
+ * @param[out] data: i2c receive buffer
+ * @param[in] size: Number of data items to receive
+ * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
+ */
+OPERATE_RET tkl_i2c_slave_receive(TUYA_I2C_NUM_E port, void *data, uint32_t size)
+{
+    // --- BEGIN: user implements ---
+    OPERATE_RET rt;
+
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
+
+    if (i2c_soft[port]) {
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    i2c_lock_get(port);
+    rt = hw_i2c_slave_receive(port, data, size);
+    i2c_lock_put(port);
+
+    return rt;
     // --- END: user implements ---
 }
 
@@ -539,6 +1275,9 @@ OPERATE_RET tkl_i2c_slave_receive(TUYA_I2C_NUM_E port, void *data, uint32_t size
 OPERATE_RET tkl_i2c_get_status(TUYA_I2C_NUM_E port, TUYA_IIC_STATUS_T *status)
 {
     // --- BEGIN: user implements ---
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
     uint32_t i2c_port = i2c_port_transfer(port);
 
     if (!status)
@@ -566,7 +1305,28 @@ OPERATE_RET tkl_i2c_get_status(TUYA_I2C_NUM_E port, TUYA_IIC_STATUS_T *status)
 OPERATE_RET tkl_i2c_reset(TUYA_I2C_NUM_E port)
 {
     // --- BEGIN: user implements ---
-    tkl_i2c_deinit(port);
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
+
+    i2c_lock_get(port);
+
+    if (i2c_soft[port]) {
+        /* nothing latched in hardware; just put both lines back to idle */
+        tkl_gpio_write(i2c_pin[port].scl, TUYA_GPIO_LEVEL_HIGH);
+        tkl_gpio_write(i2c_pin[port].sda, TUYA_GPIO_LEVEL_HIGH);
+    } else {
+        /* Free a slave still holding the line, then reset the controller. Used to just
+         * call tkl_i2c_deinit(), which left a wedged bus wedged and the port unusable. */
+        i2c_bus_recover(port);
+        hw_i2c_periph_reset(port, i2c_port_transfer(port));
+        i2c_error_flags_clear(i2c_port_transfer(port));
+    }
+
+    i2c_need_recover[port] = 0;
+    i2c_busy_release(port);
+    i2c_lock_put(port);
+
     return OPRT_OK;
     // --- END: user implements ---
 }
@@ -585,7 +1345,11 @@ OPERATE_RET tkl_i2c_reset(TUYA_I2C_NUM_E port)
 int32_t tkl_i2c_get_data_count(TUYA_I2C_NUM_E port)
 {
     // --- BEGIN: user implements ---
-    return 0;
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
+
+    return (int32_t)i2c_xfer_count[port];
     // --- END: user implements ---
 }
 
@@ -599,6 +1363,9 @@ int32_t tkl_i2c_get_data_count(TUYA_I2C_NUM_E port)
 OPERATE_RET tkl_i2c_ioctl(TUYA_I2C_NUM_E port, uint32_t cmd, void *args)
 {
     // --- BEGIN: user implements ---
+    if (port >= GD32_I2C_NUM) {
+        return OPRT_INVALID_PARM;
+    }
     return OPRT_NOT_SUPPORTED;
     // --- END: user implements ---
 }

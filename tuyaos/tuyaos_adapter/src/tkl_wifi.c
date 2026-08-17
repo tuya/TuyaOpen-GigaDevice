@@ -809,7 +809,15 @@ OPERATE_RET tkl_wifi_set_lp_mode(const BOOL_T enable, const uint8_t dtim)
     }
 
     if (enable) {
-        if (wifi_netlink_ps_mode_set(WIFI_VIF_INDEX_DEFAULT, WIFI_STA_PS_MODE_ALW_ON)
+        /* BASED_ON_TD rather than ALW_ON, on three counts that agree: it is what the SDK
+         * itself selects the moment the interface becomes a station (wifi_management.c), it
+         * is what AN150 4.5 uses for the 1.43 mA it documents, and measured on a connected
+         * board with the cpu in deep sleep it came out slightly lower than ALW_ON as well.
+         *
+         * Neither mode is what lets the cpu sleep, incidentally - LOCK_ID_WLAN is taken by
+         * wifi_sw_init() and held for the life of the stack under both, and is released on
+         * the back of the wifi_core_task_resume() that tkl_cpu_sleep_mode_set() sends. */
+        if (wifi_netlink_ps_mode_set(WIFI_VIF_INDEX_DEFAULT, WIFI_STA_PS_MODE_BASED_ON_TD)
               || wifi_netlink_listen_interval_set(dtim)) {
             return OPRT_COM_ERROR;
         }

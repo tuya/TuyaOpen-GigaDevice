@@ -16,6 +16,12 @@
 #include "tuya_error_code.h"
 // --- END: user defines and implements ---
 
+/* TUYA_GPIO_NUM_E is a common type shared by every platform, so TUYA_GPIO_NUM_MAX is
+ * far larger than what this chip bonds out. GD32VW553 exposes 29 pins:
+ * PA0-PA15, PB0-PB4, PB11-PB13, PB15, PC8, PC13-PC15. Anything above that must be
+ * rejected at the API rather than indexing past the tables below. */
+#define GD32_GPIO_NUM   29
+
 typedef struct gpio_port {
     uint32_t gpio_group;
     uint32_t pin_num;
@@ -28,7 +34,7 @@ typedef struct {
     void                *args;
 } pin_dev_map_t;
 
-static pin_dev_map_t gpio_pin_map[TUYA_GPIO_NUM_MAX] = {
+static pin_dev_map_t gpio_pin_map[GD32_GPIO_NUM] = {
     // PA0-PA15
     {EXTI_0,  false, NULL, NULL}, {EXTI_1,  false, NULL, NULL},
     {EXTI_2,  false, NULL, NULL}, {EXTI_3,  false, NULL, NULL},
@@ -62,14 +68,25 @@ void gpio_irq_hdl(uint32_t exti_line_num)
     char exti_pin_num[] = {2, 2, 2, 2, 2, 6, 13};
     char exti_pin_index_map[7][13] = {{0, 16}, {1, 17}, {2, 18}, {3, 19}, {4, 20}, {5, 6, 7, 8, 9, 25},\
                                     {10, 11, 12, 13, 14, 15, 21, 22, 23, 24, 26, 27, 28}};
+    if (exti_line_num >= sizeof(exti_pin_num)) {
+        return;
+    }
+
     for (i = 0; i < exti_pin_num[exti_line_num]; i++) {
         index = exti_pin_index_map[exti_line_num][i];
-        if (gpio_pin_map[index].is_irq == true) {
-            if (RESET != exti_interrupt_flag_get(gpio_pin_map[index].exti_line)) {
-                gpio_pin_map[index].cb(gpio_pin_map[index].args);
-                exti_interrupt_flag_clear(gpio_pin_map[index].exti_line);
-            }
+
+        if (RESET == exti_interrupt_flag_get(gpio_pin_map[index].exti_line)) {
+            continue;
         }
+
+        if (gpio_pin_map[index].is_irq && gpio_pin_map[index].cb) {
+            gpio_pin_map[index].cb(gpio_pin_map[index].args);
+        }
+
+        /* Clear whether or not anyone is listening. The flag used to be cleared only
+         * on the path that ran a callback, so a line still enabled in the EXTI after
+         * its pin was released kept re-entering this handler for ever. */
+        exti_interrupt_flag_clear(gpio_pin_map[index].exti_line);
     }
 }
 
@@ -88,7 +105,7 @@ static int pin_id_2_gpio_port(TUYA_GPIO_NUM_E pin_id, struct gpio_port *port)
         } else {
             port->pin_num = BIT((pin_id - 10));
         }
-    } else if (pin_id >= TUYA_GPIO_NUM_25 && pin_id < TUYA_GPIO_NUM_MAX) {  // PC8 & PC13 & PC15
+    } else if (pin_id >= TUYA_GPIO_NUM_25 && pin_id < GD32_GPIO_NUM) {  // PC8 & PC13 & PC15
         port->gpio_group = GPIOC;
         if (pin_id == TUYA_GPIO_NUM_25) {
             port->pin_num = GPIO_PIN_8;
@@ -152,12 +169,19 @@ OPERATE_RET tkl_gpio_init(TUYA_GPIO_NUM_E pin_id, const TUYA_GPIO_BASE_CFG_T *cf
         gpio_output_options_set(port.gpio_group, GPIO_OTYPE_OD, GPIO_OSPEED_25MHZ, port.pin_num);
         break;
     case TUYA_GPIO_OPENDRAIN_PULLUP:  // for output
-        gpio_mode_set(port.gpio_group, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, port.pin_num);
-        gpio_output_options_set(port.gpio_group, GPIO_OTYPE_OD, GPIO_OSPEED_25MHZ, port.pin_num);
-        break;
-    case TUYA_GPIO_HIGH_IMPEDANCE:    // for input
+        /* was identical to TUYA_GPIO_OPENDRAIN - the internal pull-up never got
+         * enabled, so an open-drain line had nothing to pull it back high */
         gpio_mode_set(port.gpio_group, GPIO_MODE_OUTPUT, GPIO_PUPD_PULLUP, port.pin_num);
         gpio_output_options_set(port.gpio_group, GPIO_OTYPE_OD, GPIO_OSPEED_25MHZ, port.pin_num);
+        break;
+    case TUYA_GPIO_HIGH_IMPEDANCE:
+        /* Two things were wrong here. The pin was put in open-drain *output* with a
+         * pull-up, which loads the line rather than letting go of it, and the case had
+         * no break, so it fell into default and reported failure even after doing the
+         * work. Analog mode is the real high impedance state: the input buffer is off,
+         * no pull is applied, and leakage is at its lowest. */
+        gpio_mode_set(port.gpio_group, GPIO_MODE_ANALOG, GPIO_PUPD_NONE, port.pin_num);
+        break;
     default:
         return OPRT_INVALID_PARM;
     }
@@ -175,10 +199,16 @@ OPERATE_RET tkl_gpio_init(TUYA_GPIO_NUM_E pin_id, const TUYA_GPIO_BASE_CFG_T *cf
 OPERATE_RET tkl_gpio_deinit(TUYA_GPIO_NUM_E pin_id)
 {
     // --- BEGIN: user implements ---
-    if (pin_id >= TUYA_GPIO_NUM_MAX)
+    if (pin_id >= GD32_GPIO_NUM)
         return OPRT_INVALID_PARM;
 
     if (gpio_pin_map[pin_id].is_irq == true) {
+        /* Silence the line in hardware too. Forgetting the callback while leaving the
+         * EXTI armed left the interrupt firing into a handler that no longer had
+         * anything to do with it. */
+        exti_interrupt_disable(gpio_pin_map[pin_id].exti_line);
+        exti_interrupt_flag_clear(gpio_pin_map[pin_id].exti_line);
+
         gpio_pin_map[pin_id].is_irq = false;
         gpio_pin_map[pin_id].args = NULL;
         gpio_pin_map[pin_id].cb = NULL;
@@ -246,8 +276,24 @@ OPERATE_RET tkl_gpio_irq_init(TUYA_GPIO_NUM_E pin_id, const TUYA_GPIO_IRQ_T *cfg
     if (pin_id_2_gpio_port(pin_id, &port))
         return OPRT_INVALID_PARM;
 
-    // se t as input mode
-    gpio_mode_set(port.gpio_group, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, port.pin_num);
+    /* Bias the line away from the edge being waited for, otherwise that edge can never
+     * happen. This used to be a hardcoded pull-up, which pinned an active-high input
+     * high for good and made TUYA_GPIO_IRQ_RISE impossible to trigger. */
+    switch (cfg->mode) {
+    case TUYA_GPIO_IRQ_RISE:
+    case TUYA_GPIO_IRQ_HIGH:
+        gpio_mode_set(port.gpio_group, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, port.pin_num);
+        break;
+    case TUYA_GPIO_IRQ_FALL:
+    case TUYA_GPIO_IRQ_LOW:
+        gpio_mode_set(port.gpio_group, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, port.pin_num);
+        break;
+    case TUYA_GPIO_IRQ_RISE_FALL:
+    default:
+        /* both edges matter, so let the external circuit decide the idle level */
+        gpio_mode_set(port.gpio_group, GPIO_MODE_INPUT, GPIO_PUPD_NONE, port.pin_num);
+        break;
+    }
 
     rcu_periph_clock_enable(RCU_SYSCFG);
 
@@ -300,7 +346,7 @@ OPERATE_RET tkl_gpio_irq_init(TUYA_GPIO_NUM_E pin_id, const TUYA_GPIO_IRQ_T *cfg
 OPERATE_RET tkl_gpio_irq_enable(TUYA_GPIO_NUM_E pin_id)
 {
     // --- BEGIN: user implements ---
-    if (pin_id >= TUYA_GPIO_NUM_MAX)
+    if (pin_id >= GD32_GPIO_NUM)
         return OPRT_INVALID_PARM;
 
     if (gpio_pin_map[pin_id].is_irq == false)
@@ -334,6 +380,7 @@ OPERATE_RET tkl_gpio_irq_enable(TUYA_GPIO_NUM_E pin_id)
     }
 
     exti_interrupt_flag_clear(gpio_pin_map[pin_id].exti_line);
+    exti_interrupt_enable(gpio_pin_map[pin_id].exti_line);
 
     return OPRT_OK;
     // --- END: user implements ---
@@ -349,33 +396,14 @@ OPERATE_RET tkl_gpio_irq_enable(TUYA_GPIO_NUM_E pin_id)
 OPERATE_RET tkl_gpio_irq_disable(TUYA_GPIO_NUM_E pin_id)
 {
     // --- BEGIN: user implements ---
-    if (pin_id >= TUYA_GPIO_NUM_MAX)
+    if (pin_id >= GD32_GPIO_NUM)
         return OPRT_INVALID_PARM;
 
-    switch (gpio_pin_map[pin_id].exti_line)
-    {
-    case EXTI_0:
-        eclic_irq_disable(EXTI0_IRQn);
-        break;
-    case EXTI_1:
-        eclic_irq_disable(EXTI1_IRQn);
-        break;
-    case EXTI_2:
-        eclic_irq_disable(EXTI2_IRQn);
-        break;
-    case EXTI_3:
-        eclic_irq_disable(EXTI3_IRQn);
-        break;
-    case EXTI_4:
-        eclic_irq_disable(EXTI4_IRQn);
-        break;
-    case EXTI_5 ... EXTI_9:
-        eclic_irq_disable(EXTI5_9_IRQn);
-        break;
-    case EXTI_10 ... EXTI_15:
-        eclic_irq_disable(EXTI10_15_IRQn);
-        break;
-    }
+    /* Mask this line only. Lines 5..9 and 10..15 share one interrupt vector between
+     * them, so switching the vector off - which is what this used to do - silenced
+     * every other pin in the same group as collateral damage. */
+    exti_interrupt_disable(gpio_pin_map[pin_id].exti_line);
+    exti_interrupt_flag_clear(gpio_pin_map[pin_id].exti_line);
 
     return OPRT_OK;
     // --- END: user implements ---

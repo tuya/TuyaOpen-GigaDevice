@@ -54,6 +54,19 @@ extern "C" {
 #define USART0_RX_GPIO                  GPIOB
 #define USART0_RX_PIN                   GPIO_PIN_15
 #define USART0_RX_AF_NUM                GPIO_AF_8
+#elif CONFIG_BOARD == PLATFORM_BOARD_32VW55X_EVAL
+/* GigaDevice's own eval board puts USART0 here, and its Utilities/gd32vw553h_eval.h says
+ * TX = PB15 AF8, RX = PA8 AF2 - which is also what the datasheet's alternate function table
+ * (Table 2-5/2-6) and the LCKFB board documentation give. The F527 branch above has the same
+ * two pads with tx and rx the other way round; that one is dead code here and disagrees with
+ * all three sources. */
+#define USART0_TX_GPIO                  GPIOB
+#define USART0_TX_PIN                   GPIO_PIN_15
+#define USART0_TX_AF_NUM                GPIO_AF_8
+
+#define USART0_RX_GPIO                  GPIOA
+#define USART0_RX_PIN                   GPIO_PIN_8
+#define USART0_RX_AF_NUM                GPIO_AF_2
 #else /* PLATFORM_BOARD_32VW55X_F527 */
 #define USART0_TX_GPIO                  GPIOA
 #define USART0_TX_PIN                   GPIO_PIN_0
@@ -64,15 +77,6 @@ extern "C" {
 #define USART0_RX_AF_NUM                GPIO_AF_0
 #endif /* PLATFORM_BOARD_32VW55X_F527 */
 
-#if TOS_PROJECT_BOARD == GD32_MC_FOC_VWS_VW553
-#undef USART0_RX_GPIO
-#undef USART0_RX_PIN
-#undef USART0_RX_AF_NUM
-#define USART0_RX_GPIO                  GPIOA
-#define USART0_RX_PIN                   GPIO_PIN_15
-#define USART0_RX_AF_NUM                GPIO_AF_7
-#endif
-
 #define USART0_CTS_GPIO                 GPIOA
 #define USART0_CTS_PIN                  GPIO_PIN_2
 #define USART0_CTS_AF_NUM               GPIO_AF_0
@@ -81,13 +85,18 @@ extern "C" {
 #define USART0_RTS_PIN                  GPIO_PIN_3
 #define USART0_RTS_AF_NUM               GPIO_AF_0
 
-#define UART1_TX_GPIO                   GPIOB
-#define UART1_TX_PIN                    GPIO_PIN_15
-#define UART1_TX_AF_NUM                 GPIO_AF_7
+/* PB15/PA8 belong to USART0 above - they are the pads this chip's eval board, and the boards
+ * derived from it, bring out as the main serial port. UART1 can reach them too, on different
+ * AF indexes, but two ports cannot own one pad: whichever is initialised last wins, silently.
+ * PA4/PA5 is the only other UART1 pair that collides with nothing else (PA2/PA3 are USART0's
+ * cts/rts, PB0/PB1 are UART2's). */
+#define UART1_TX_GPIO                   GPIOA
+#define UART1_TX_PIN                    GPIO_PIN_4
+#define UART1_TX_AF_NUM                 GPIO_AF_0
 
 #define UART1_RX_GPIO                   GPIOA
-#define UART1_RX_PIN                    GPIO_PIN_8
-#define UART1_RX_AF_NUM                 GPIO_AF_3
+#define UART1_RX_PIN                    GPIO_PIN_5
+#define UART1_RX_AF_NUM                 GPIO_AF_0
 
 #define UART1_CTS_GPIO                  GPIOA
 #define UART1_CTS_PIN                   GPIO_PIN_0

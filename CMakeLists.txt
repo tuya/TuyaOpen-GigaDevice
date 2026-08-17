@@ -37,6 +37,46 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
 # Set global compiler flags
 add_compile_options(-fdiagnostics-color=always)
+
+########################################
+# Board driven configuration
+#
+# Everything a board needs to say about the platform comes in through Kconfig, so
+# adding a board only ever touches boards/GD32/<board>/. Anything resolved here is
+# injected as a compile definition and the SDK headers keep their own value as the
+# fallback (they guard their defines with #ifndef).
+########################################
+
+# which uart carries the log - see CONFIG_GD32_LOG_UART_PORT in boards/GD32/Kconfig
+if(DEFINED CONFIG_GD32_LOG_UART_PORT)
+    # the exti line goes with it: deep_sleep_enter() arms the log uart's rx pin as a console
+    # wakeup source, and the SDK hardcodes EXTI_7 - right only for UART2 on PA7. Arming the
+    # wrong line loses console wakeup and lets an unrelated, possibly floating pin break
+    # deep sleep. rx pins per uart.h: USART0 PA8, UART1 PA5, UART2 PA7.
+    if(CONFIG_GD32_LOG_UART_PORT EQUAL 0)
+        set(_GD32_LOG_UART USART0)
+        set(_GD32_LOG_UART_RX_EXTI EXTI_8)
+    elseif(CONFIG_GD32_LOG_UART_PORT EQUAL 1)
+        set(_GD32_LOG_UART UART1)
+        set(_GD32_LOG_UART_RX_EXTI EXTI_5)
+    elseif(CONFIG_GD32_LOG_UART_PORT EQUAL 2)
+        set(_GD32_LOG_UART UART2)
+        set(_GD32_LOG_UART_RX_EXTI EXTI_7)
+    else()
+        message(FATAL_ERROR "CONFIG_GD32_LOG_UART_PORT must be 0, 1 or 2, got ${CONFIG_GD32_LOG_UART_PORT}")
+    endif()
+    message(STATUS "GD32 log uart: ${_GD32_LOG_UART} rx exti ${_GD32_LOG_UART_RX_EXTI} "
+                   "(CONFIG_GD32_LOG_UART_PORT=${CONFIG_GD32_LOG_UART_PORT})")
+    add_compile_definitions(LOG_UART=${_GD32_LOG_UART})
+    add_compile_definitions(LOG_USART_RX_PIN_EXTI_LINE=${_GD32_LOG_UART_RX_EXTI})
+endif()
+
+# expose the selected board as a definite macro, so board specific code can use
+# #ifdef TOS_BOARD_<name> instead of comparing two identifiers that may both be
+# undefined - "#if UNDEFINED_A == UNDEFINED_B" silently evaluates to true
+if(PLATFORM_BOARD AND NOT PLATFORM_BOARD STREQUAL "NONE")
+    add_compile_definitions(TOS_BOARD_${PLATFORM_BOARD}=1)
+endif()
 option(ENABLE_TUYA_TRIM "Enable adapter fine-grained trimming and section GC" ON)
 option(ENABLE_ADAPTER_WHOLE_ARCHIVE "Force whole-archive for all adapter sub-libs when trimmed" OFF)
 option(ENABLE_STRICT_BLE_VENDOR_ISOLATION "Force using vendor BLE exported headers; demote or remove NimBLE include paths" ON)

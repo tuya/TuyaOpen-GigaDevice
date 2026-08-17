@@ -10,8 +10,273 @@
  */
 
 // --- BEGIN: user defines and implements ---
+#include "gd32vw55x.h"
+#include "gd32vw55x_pmu.h"
+#include "gd32vw55x_rtc.h"
+#include "gd32vw55x_exti.h"
+#include "gd32vw55x_gpio.h"
+#include "gd32vw55x_rcu.h"
 #include "tkl_wakeup.h"
 #include "tuya_error_code.h"
+
+/*
+ * GD32VW553 offers two ways to leave a low power mode on a pin edge:
+ *
+ *  - the four dedicated PMU WKUP pins, which also bring the chip out of standby;
+ *  - any GPIO through its EXTI line, which works from sleep and deep-sleep but not
+ *    from standby (the EXTI block is powered down there).
+ *
+ * The WKUP pins only react to a rising edge, so a falling-edge request always takes
+ * the EXTI route. Level triggered wakeup has no hardware backing on this chip at all
+ * and is rejected instead of being silently turned into an edge.
+ */
+#define GD32_GPIO_NUM   29
+
+typedef struct {
+    uint16_t pin;           /* TUYA_IO_PIN_x                */
+    uint32_t wkup;          /* PMU_WAKEUP_PINx              */
+} wkup_pin_map_t;
+
+static const wkup_pin_map_t wkup_pin_map[] = {
+    {TUYA_GPIO_NUM_0,  PMU_WAKEUP_PIN0},    /* PA0  */
+    {TUYA_GPIO_NUM_15, PMU_WAKEUP_PIN1},    /* PA15 */
+    {TUYA_GPIO_NUM_7,  PMU_WAKEUP_PIN2},    /* PA7  */
+    {TUYA_GPIO_NUM_12, PMU_WAKEUP_PIN3},    /* PA12 */
+};
+
+/* RTC alarm callback handed in through TUYA_WAKEUP_SOURCE_RTC_T */
+static TUYA_RTC_ISR_CB  s_rtc_wakeup_cb   = NULL;
+static void            *s_rtc_wakeup_args = NULL;
+static TUYA_RTC_NUM_E   s_rtc_wakeup_port = TUYA_RTC_NUM_0;
+
+static int int_2_bcd(int val)
+{
+    return ((val / 10) << 4) | (val % 10);
+}
+
+static int bcd_2_int(int bcd)
+{
+    return ((bcd >> 4) * 10) + (bcd & 0x0F);
+}
+
+static int pin_id_to_gpio(uint32_t pin_id, uint32_t *group, uint32_t *pin_num)
+{
+    if (pin_id <= TUYA_GPIO_NUM_15) {               /* PA0 - PA15  */
+        *group   = GPIOA;
+        *pin_num = BIT(pin_id);
+    } else if (pin_id <= TUYA_GPIO_NUM_20) {        /* PB0 - PB4   */
+        *group   = GPIOB;
+        *pin_num = BIT(pin_id - TUYA_GPIO_NUM_16);
+    } else if (pin_id <= TUYA_GPIO_NUM_24) {        /* PB11 - PB13, PB15 */
+        *group   = GPIOB;
+        *pin_num = (pin_id == TUYA_GPIO_NUM_24) ? GPIO_PIN_15 : BIT(pin_id - 10);
+    } else if (pin_id == TUYA_GPIO_NUM_25) {        /* PC8         */
+        *group   = GPIOC;
+        *pin_num = GPIO_PIN_8;
+    } else if (pin_id < GD32_GPIO_NUM) {            /* PC13 - PC15 */
+        *group   = GPIOC;
+        *pin_num = BIT(pin_id - 13);
+    } else {
+        return -1;
+    }
+
+    return 0;
+}
+
+static const wkup_pin_map_t *wkup_pin_find(uint32_t pin_id)
+{
+    uint32_t i;
+
+    for (i = 0; i < sizeof(wkup_pin_map) / sizeof(wkup_pin_map[0]); i++) {
+        if (wkup_pin_map[i].pin == pin_id) {
+            return &wkup_pin_map[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void gpio_exti_source_config(uint32_t group, uint32_t pin_num)
+{
+    uint8_t pin_idx = (uint8_t)(31 - __CLZ(pin_num));
+
+    rcu_periph_clock_enable(RCU_SYSCFG);
+
+    switch (group) {
+    case GPIOA:
+        syscfg_exti_line_config(EXTI_SOURCE_GPIOA, pin_idx);
+        break;
+    case GPIOB:
+        syscfg_exti_line_config(EXTI_SOURCE_GPIOB, pin_idx);
+        break;
+    case GPIOC:
+        syscfg_exti_line_config(EXTI_SOURCE_GPIOC, pin_idx);
+        break;
+    default:
+        break;
+    }
+}
+
+static OPERATE_RET gpio_wakeup_set(const TUYA_WAKEUP_SOURCE_GPIO_T *cfg)
+{
+    const wkup_pin_map_t *wkup;
+    uint32_t group, pin_num, exti_line;
+    exti_trig_type_enum trig;
+
+    if (pin_id_to_gpio(cfg->gpio_num, &group, &pin_num)) {
+        return OPRT_INVALID_PARM;
+    }
+
+    switch (cfg->level) {
+    case TUYA_GPIO_WAKEUP_HIGH:
+    case TUYA_GPIO_WAKEUP_RISE:
+        wkup = wkup_pin_find(cfg->gpio_num);
+        if (wkup) {
+            /* dedicated WKUP pin: also wakes the chip from standby */
+            gpio_mode_set(group, GPIO_MODE_INPUT, GPIO_PUPD_PULLDOWN, pin_num);
+            pmu_wakeup_pin_enable(wkup->wkup);
+            return OPRT_OK;
+        }
+        if (cfg->level == TUYA_GPIO_WAKEUP_HIGH) {
+            /* no level triggered wakeup outside the WKUP pins */
+            return OPRT_NOT_SUPPORTED;
+        }
+        trig = EXTI_TRIG_RISING;
+        break;
+
+    case TUYA_GPIO_WAKEUP_FALL:
+        trig = EXTI_TRIG_FALLING;
+        break;
+
+    case TUYA_GPIO_WAKEUP_LOW:
+    default:
+        return OPRT_NOT_SUPPORTED;
+    }
+
+    /* EXTI route: wakes from sleep and deep-sleep, not from standby.
+     * EXTI_EVENT rather than EXTI_INTERRUPT so no ISR is required. */
+    exti_line = BIT(31 - __CLZ(pin_num));
+
+    /* Only give the pin an idle level if nothing else owns it. A uart rx line armed as a
+     * wakeup source still has to be a uart rx line, and exti routing works either way. */
+    if (((GPIO_CTL(group) >> (2 * (31 - __CLZ(pin_num)))) & 0x3) != GPIO_MODE_AF) {
+        gpio_mode_set(group, GPIO_MODE_INPUT,
+                      (trig == EXTI_TRIG_RISING) ? GPIO_PUPD_PULLDOWN : GPIO_PUPD_PULLUP,
+                      pin_num);
+    }
+    gpio_exti_source_config(group, pin_num);
+    exti_init((exti_line_enum)exti_line, EXTI_EVENT, trig);
+    exti_interrupt_flag_clear((exti_line_enum)exti_line);
+
+    return OPRT_OK;
+}
+
+static OPERATE_RET gpio_wakeup_clear(const TUYA_WAKEUP_SOURCE_GPIO_T *cfg)
+{
+    const wkup_pin_map_t *wkup;
+    uint32_t group, pin_num, exti_line;
+
+    if (pin_id_to_gpio(cfg->gpio_num, &group, &pin_num)) {
+        return OPRT_INVALID_PARM;
+    }
+
+    wkup = wkup_pin_find(cfg->gpio_num);
+    if (wkup) {
+        pmu_wakeup_pin_disable(wkup->wkup);
+    }
+
+    exti_line = BIT(31 - __CLZ(pin_num));
+    exti_interrupt_flag_clear((exti_line_enum)exti_line);
+    exti_deinit();
+
+    return OPRT_OK;
+}
+
+/* RTC_Alarm_IRQHandler is declared .weak in plf/riscv/env/start.S and already sits in
+ * the vector table, so defining it here needs no change to the SDK. */
+void RTC_Alarm_IRQHandler(void)
+{
+    if (RESET != rtc_flag_get(RTC_FLAG_ALARM0)) {
+        rtc_flag_clear(RTC_FLAG_ALARM0);
+        exti_interrupt_flag_clear(EXTI_17);
+
+        if (s_rtc_wakeup_cb) {
+            s_rtc_wakeup_cb(s_rtc_wakeup_port, s_rtc_wakeup_args);
+        }
+    }
+}
+
+static OPERATE_RET rtc_wakeup_set(const TUYA_WAKEUP_SOURCE_RTC_T *cfg)
+{
+    rtc_parameter_struct now = {0};
+    rtc_alarm_struct alarm = {0};
+    uint32_t delay_s, sec, min, hour;
+
+    if (cfg->RTC_num != TUYA_RTC_NUM_0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    /* the alarm registers only resolve down to one second */
+    if (cfg->ms < 1000) {
+        return OPRT_NOT_SUPPORTED;
+    }
+    delay_s = cfg->ms / 1000;
+
+    rtc_register_sync_wait();
+    rtc_current_time_get(&now);
+
+    sec  = bcd_2_int(now.second) + delay_s;
+    min  = bcd_2_int(now.minute) + sec / 60;
+    sec %= 60;
+    hour = bcd_2_int(now.hour) + min / 60;
+    min %= 60;
+    hour %= 24;
+
+    /* mask the date so the alarm matches on hh:mm:ss of any day */
+    alarm.alarm_mask      = RTC_ALARM_DATE_MASK;
+    alarm.weekday_or_date = RTC_ALARM_DATE_SELECTED;
+    alarm.alarm_day       = now.date;
+    alarm.alarm_hour      = int_2_bcd((int)hour);
+    alarm.alarm_minute    = int_2_bcd((int)min);
+    alarm.alarm_second    = int_2_bcd((int)sec);
+    alarm.am_pm           = RTC_AM;
+
+    rtc_alarm_disable(RTC_ALARM0);
+    rtc_alarm_config(RTC_ALARM0, &alarm);
+    rtc_flag_clear(RTC_FLAG_ALARM0);
+
+    s_rtc_wakeup_cb   = cfg->cb;
+    s_rtc_wakeup_args = cfg->args;
+    s_rtc_wakeup_port = cfg->RTC_num;
+
+    /* RTC alarm reaches the core over EXTI line 17 */
+    exti_init(EXTI_17, EXTI_INTERRUPT, EXTI_TRIG_RISING);
+    exti_interrupt_flag_clear(EXTI_17);
+
+    rtc_interrupt_enable(RTC_INT_ALARM0);
+    rtc_alarm_enable(RTC_ALARM0);
+    eclic_irq_enable(RTC_Alarm_IRQn, 8, 0);
+
+    return OPRT_OK;
+}
+
+static OPERATE_RET rtc_wakeup_clear(const TUYA_WAKEUP_SOURCE_RTC_T *cfg)
+{
+    if (cfg->RTC_num != TUYA_RTC_NUM_0) {
+        return OPRT_INVALID_PARM;
+    }
+
+    eclic_irq_disable(RTC_Alarm_IRQn);
+    rtc_interrupt_disable(RTC_INT_ALARM0);
+    rtc_alarm_disable(RTC_ALARM0);
+    rtc_flag_clear(RTC_FLAG_ALARM0);
+    exti_interrupt_flag_clear(EXTI_17);
+
+    s_rtc_wakeup_cb   = NULL;
+    s_rtc_wakeup_args = NULL;
+
+    return OPRT_OK;
+}
 // --- END: user defines and implements ---
 
 /**
@@ -25,7 +290,25 @@
 OPERATE_RET tkl_wakeup_source_set(const TUYA_WAKEUP_SOURCE_BASE_CFG_T *param)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    if (param == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    switch (param->source) {
+    case TUYA_WAKEUP_SOURCE_GPIO:
+        return gpio_wakeup_set(&param->wakeup_para.gpio_param);
+
+    case TUYA_WAKEUP_SOURCE_RTC:
+        return rtc_wakeup_set(&param->wakeup_para.rtc_param);
+
+    case TUYA_WAKEUP_SOURCE_TIMER:
+        /* TIMER1/TIMER2 are clocked from APB and stop in every low power mode, so a
+         * general purpose timer cannot serve as a wakeup source here - use the RTC. */
+        return OPRT_NOT_SUPPORTED;
+
+    default:
+        return OPRT_INVALID_PARM;
+    }
     // --- END: user implements ---
 }
 
@@ -39,7 +322,22 @@ OPERATE_RET tkl_wakeup_source_set(const TUYA_WAKEUP_SOURCE_BASE_CFG_T *param)
 OPERATE_RET tkl_wakeup_source_clear(const TUYA_WAKEUP_SOURCE_BASE_CFG_T *param)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    if (param == NULL) {
+        return OPRT_INVALID_PARM;
+    }
+
+    switch (param->source) {
+    case TUYA_WAKEUP_SOURCE_GPIO:
+        return gpio_wakeup_clear(&param->wakeup_para.gpio_param);
+
+    case TUYA_WAKEUP_SOURCE_RTC:
+        return rtc_wakeup_clear(&param->wakeup_para.rtc_param);
+
+    case TUYA_WAKEUP_SOURCE_TIMER:
+        return OPRT_NOT_SUPPORTED;
+
+    default:
+        return OPRT_INVALID_PARM;
+    }
     // --- END: user implements ---
 }
-

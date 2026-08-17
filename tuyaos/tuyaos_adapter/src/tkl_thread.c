@@ -13,6 +13,7 @@
 #include "tkl_thread.h"
 #include "tuya_error_code.h"
 #include "wrapper_os.h"
+#include "dbg_print.h"
 // --- END: user defines and implements ---
 
 /**
@@ -212,6 +213,17 @@ OPERATE_RET tkl_thread_set_priority(TKL_THREAD_HANDLE thread, int priority)
 OPERATE_RET tkl_thread_diagnose(TKL_THREAD_HANDLE thread)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    if (NULL == thread) {
+        return OPRT_OS_ADAPTER_INVALID_PARM;
+    }
+
+    /* sys_stack_free_get() counts words, the same conversion tkl_thread_get_watermark
+     * uses. There is no per-task stack dump in the RTOS wrapper, so report the
+     * headroom left on this thread - the number that actually tells you whether a
+     * stack is about to overflow. */
+    dbg_print(NOTICE, "thread %p stack free: %u bytes\r\n",
+              thread, (unsigned int)(sys_stack_free_get(thread) * 4));
+
+    return OPRT_OK;
     // --- END: user implements ---
 }

@@ -15,7 +15,13 @@
 #include "gd32vw55x_timer.h"
 #include "tkl_timer.h"
 #include "tuya_error_code.h"
+#include "gd32_peri_busy.h"
+#include <stdatomic.h>
 // --- END: user defines and implements ---
+
+/* TUYA_TIMER_NUM_MAX is the common upper bound shared by all platforms; only TIMER1
+ * and TIMER2 are handed to the timer API here (TIMER0/15/16 drive PWM). */
+#define GD32_TIMER_NUM  2
 
 /**
  * @brief timer init
@@ -34,21 +40,40 @@ typedef struct timer_item
     TUYA_TIMER_BASE_CFG_T timer_cfg;
 } timer_item_t;
 
-static timer_item_t timer_map[TUYA_TIMER_NUM_MAX] = {
+static timer_item_t timer_map[GD32_TIMER_NUM] = {
     {TIMER1, FALSE, 0, {0}},
     {TIMER2, FALSE, 0, {0}},
 };
+
+/* These count off an apb clock that stop mode takes away, so a running one would simply stop
+ * and its period expire late by however long the chip slept. Hold idle to shallow sleep while
+ * one is armed - there it keeps counting and its interrupt still arrives on time. */
+static atomic_int timer_vote[GD32_TIMER_NUM];
+
+static void timer_clock_hold(TUYA_TIMER_NUM_E timer_id)
+{
+    if (atomic_exchange(&timer_vote[timer_id], 1) == 0) {
+        gd32_peri_busy_inc();
+    }
+}
+
+static void timer_clock_release(TUYA_TIMER_NUM_E timer_id)
+{
+    if (atomic_exchange(&timer_vote[timer_id], 0) == 1) {
+        gd32_peri_busy_dec();
+    }
+}
 
 void timer_irq_hdl(uint32_t timer)
 {
     uint8_t i = 0;
 
-    for (; i < TUYA_TIMER_NUM_MAX; i++) {
+    for (; i < GD32_TIMER_NUM; i++) {
         if (timer_map[i].timer == timer)
             break;
     }
 
-    if ((i < TUYA_TIMER_NUM_MAX) && (SET == timer_interrupt_flag_get(timer, TIMER_INT_UP))) {
+    if ((i < GD32_TIMER_NUM) && (SET == timer_interrupt_flag_get(timer, TIMER_INT_UP))) {
         timer_interrupt_flag_clear(timer, TIMER_INT_UP);
         timer_map[i].timer_cfg.cb(timer_map[i].timer_cfg.args);
     }
@@ -59,7 +84,7 @@ static void timer_callback_transfer(void *p_tmr, void *p_arg)
 {
     uint8_t i = 0;
 
-    for (; i < TUYA_TIMER_NUM_MAX; i++) {
+    for (; i < GD32_TIMER_NUM; i++) {
         if (timer_map[i].timer == p_tmr) {
             timer_map[i].timer_cfg.cb(p_arg);
         }
@@ -81,7 +106,7 @@ static void timer_callback_transfer(void *p_tmr, void *p_arg)
 OPERATE_RET tkl_timer_init(TUYA_TIMER_NUM_E timer_id, TUYA_TIMER_BASE_CFG_T *cfg)
 {
     // --- BEGIN: user implements ---
-    if (timer_id >= TUYA_TIMER_NUM_MAX) {
+    if (timer_id >= GD32_TIMER_NUM) {
         return OPRT_BASE_TIMEQ_TIMERID_UNVALID;
     }
 
@@ -109,7 +134,7 @@ OPERATE_RET tkl_timer_init(TUYA_TIMER_NUM_E timer_id, TUYA_TIMER_BASE_CFG_T *cfg
 OPERATE_RET tkl_timer_start(TUYA_TIMER_NUM_E timer_id, uint32_t us)
 {
     // --- BEGIN: user implements ---
-    if (us < 1000 || timer_id >= TUYA_TIMER_NUM_MAX) {
+    if (us < 1000 || timer_id >= GD32_TIMER_NUM) {
         /* timer can't not set cycle less than 1ms */
         return OPRT_BASE_TIMEQ_TIMERID_UNVALID;
     }
@@ -148,6 +173,7 @@ OPERATE_RET tkl_timer_start(TUYA_TIMER_NUM_E timer_id, uint32_t us)
     timer_interrupt_flag_clear(timer, TIMER_INT_FLAG_UP);
     timer_interrupt_enable(timer, TIMER_INT_UP);
     timer_enable(timer);
+    timer_clock_hold(timer_id);
 
     timer_map[timer_id].timer_interval = us;
 
@@ -165,11 +191,12 @@ OPERATE_RET tkl_timer_start(TUYA_TIMER_NUM_E timer_id, uint32_t us)
 OPERATE_RET tkl_timer_stop(TUYA_TIMER_NUM_E timer_id)
 {
     // --- BEGIN: user implements ---
-    if (timer_id >= TUYA_TIMER_NUM_MAX)
+    if (timer_id >= GD32_TIMER_NUM)
         return OPRT_BASE_TIMEQ_TIMERID_UNVALID;
 
     // sys_timer_stop(&timer_map[timer_id].timer, FALSE);
     timer_disable(timer_map[timer_id].timer);
+    timer_clock_release(timer_id);
 
     return OPRT_OK;
     // --- END: user implements ---
@@ -185,11 +212,12 @@ OPERATE_RET tkl_timer_stop(TUYA_TIMER_NUM_E timer_id)
 OPERATE_RET tkl_timer_deinit(TUYA_TIMER_NUM_E timer_id)
 {
     // --- BEGIN: user implements ---
-    if (timer_id >= TUYA_TIMER_NUM_MAX)
+    if (timer_id >= GD32_TIMER_NUM)
         return OPRT_BASE_TIMEQ_TIMERID_UNVALID;
 
     // sys_timer_delete(&timer_map[timer_id].timer);
     timer_deinit(timer_map[timer_id].timer);
+    timer_clock_release(timer_id);
     timer_map[timer_id].used = FALSE;
 
     return OPRT_OK;
@@ -207,7 +235,7 @@ OPERATE_RET tkl_timer_deinit(TUYA_TIMER_NUM_E timer_id)
 OPERATE_RET tkl_timer_get_current_value(TUYA_TIMER_NUM_E timer_id, uint32_t *us)
 {
     // --- BEGIN: user implements ---
-    if (timer_id >= TUYA_TIMER_NUM_MAX)
+    if (timer_id >= GD32_TIMER_NUM)
         return OPRT_BASE_TIMEQ_TIMERID_UNVALID;
 
     if (us == NULL)
@@ -230,7 +258,7 @@ OPERATE_RET tkl_timer_get_current_value(TUYA_TIMER_NUM_E timer_id, uint32_t *us)
 OPERATE_RET tkl_timer_get(TUYA_TIMER_NUM_E timer_id, uint32_t *us)
 {
     // --- BEGIN: user implements ---
-    if (timer_id >= TUYA_TIMER_NUM_MAX)
+    if (timer_id >= GD32_TIMER_NUM)
         return OPRT_BASE_TIMEQ_TIMERID_UNVALID;
 
     if (us == NULL)

@@ -16,7 +16,15 @@
 #include "cyclic_buffer.h"
 #include "tkl_uart.h"
 #include "tuya_error_code.h"
+#include "gd32_peri_busy.h"
+#include "dbg_print.h"
+#include <stdatomic.h>
 // --- END: user defines and implements ---
+
+/* TUYA_UART_NUM_MAX is the common upper bound shared by all platforms; GD32VW553 has
+ * three usable ports (USART0, UART1, UART2). TUYA_UART_NUM_MAX is still used below as
+ * the "slot empty" marker, since it can never equal a valid port id. */
+#define GD32_UART_NUM   3
 
 typedef struct tuya_uart_cb_item
 {
@@ -24,24 +32,116 @@ typedef struct tuya_uart_cb_item
     TUYA_UART_IRQ_CB callback;
 } tuya_uart_cb_item_t;
 
-static tuya_uart_cb_item_t uart_rx_cbs[TUYA_UART_NUM_MAX] = {
+static tuya_uart_cb_item_t uart_rx_cbs[GD32_UART_NUM] = {
     {TUYA_UART_NUM_MAX, NULL},
     {TUYA_UART_NUM_MAX, NULL},
     {TUYA_UART_NUM_MAX, NULL},
 };
 
-static tuya_uart_cb_item_t uart_tx_cbs[TUYA_UART_NUM_MAX] = {
+static tuya_uart_cb_item_t uart_tx_cbs[GD32_UART_NUM] = {
     {TUYA_UART_NUM_MAX, NULL},
     {TUYA_UART_NUM_MAX, NULL},
     {TUYA_UART_NUM_MAX, NULL},
 };
+
+/* Stop mode takes the uart clock away mid-byte, so a transmission still on the wire when idle
+ * decides to sleep is simply truncated - and TBE, which the write loop below waits on, only says
+ * the holding register is free, not that the shift register has finished. The manual is explicit
+ * about this (16.3.15): before entering deep-sleep, dma must be off and BSY must be clear.
+ *
+ * Which of the two guards applies depends on how the port is being driven:
+ *   - synchronous, the common case: wait for TC before returning, so "write returned" means
+ *     nothing is in flight. Costs one character time, about 87 us at 115200.
+ *   - transmit-complete interrupt armed by the caller: returning early is the whole point, so
+ *     hold the peripheral clock vote instead and drop it in the isr that sees TC.
+ * There is no dma path in this file, so that requirement is met by construction. */
+static uint8_t uart_tx_int_en[GD32_UART_NUM] = {0};
+static atomic_int uart_tx_vote[GD32_UART_NUM];
+
+static void uart_tx_vote_hold(uint8_t idx)
+{
+    if (atomic_exchange(&uart_tx_vote[idx], 1) == 0) {
+        gd32_peri_busy_inc();
+    }
+}
+
+static void uart_tx_vote_release(uint8_t idx)
+{
+    if (atomic_exchange(&uart_tx_vote[idx], 0) == 1) {
+        gd32_peri_busy_dec();
+    }
+}
+
+/*
+ * Which tx/rx pins a port ends up on.
+ *
+ * The pins below in uart.h are what the chip resets to, and they are right for a bare module.
+ * A board that wired a port somewhere else says so from board_register_hardware() with
+ * tkl_io_pinmux_config(pin, TUYA_UARTx_TX/RX), which lands in __tkl_uart_set_tx_pin() /
+ * __tkl_uart_set_rx_pin() here - the same shape tkl_i2c.c already uses for its scl/sda.
+ *
+ * pinmux has already done the whole job for that pin by then: alternate function, mode and
+ * drive. So all tkl_uart_init() owes it is to leave the default pin alone, which is what these
+ * flags are for. Configuring both would leave two pads driving one peripheral input.
+ *
+ * Keeping this out here rather than in a board macro is what lets an application ask for
+ * "uart 0" and get whatever pins this board put it on.
+ */
+#define UART_PIN_UNSET      ((TUYA_GPIO_NUM_E)0xFF)
+
+typedef struct {
+    TUYA_GPIO_NUM_E tx;
+    TUYA_GPIO_NUM_E rx;
+} uart_pin_t;
+
+static uart_pin_t uart_pin[GD32_UART_NUM] = {
+    {UART_PIN_UNSET, UART_PIN_UNSET},
+    {UART_PIN_UNSET, UART_PIN_UNSET},
+    {UART_PIN_UNSET, UART_PIN_UNSET},
+};
+
+void __tkl_uart_set_tx_pin(TUYA_UART_NUM_E port, TUYA_PIN_NAME_E tx_pin)
+{
+    if ((port & 0xffff) < GD32_UART_NUM) {
+        uart_pin[port & 0xffff].tx = (TUYA_GPIO_NUM_E)tx_pin;
+    }
+}
+
+void __tkl_uart_set_rx_pin(TUYA_UART_NUM_E port, TUYA_PIN_NAME_E rx_pin)
+{
+    if ((port & 0xffff) < GD32_UART_NUM) {
+        uart_pin[port & 0xffff].rx = (TUYA_GPIO_NUM_E)rx_pin;
+    }
+}
+
+static int uart_tx_is_remapped(TUYA_UART_NUM_E port_id)
+{
+    return ((port_id & 0xffff) < GD32_UART_NUM) && (uart_pin[port_id & 0xffff].tx != UART_PIN_UNSET);
+}
+
+static int uart_rx_is_remapped(TUYA_UART_NUM_E port_id)
+{
+    return ((port_id & 0xffff) < GD32_UART_NUM) && (uart_pin[port_id & 0xffff].rx != UART_PIN_UNSET);
+}
+
+/* the high 16 bits of port_id carry a platform specific uart type on some ports, so
+ * mask them off the same way the rest of this file does */
+static int uart_port_to_periph(TUYA_UART_NUM_E port_id, uint32_t *periph)
+{
+    switch (port_id & 0xffff) {
+    case TUYA_UART_NUM_0: *periph = USART0; return 0;
+    case TUYA_UART_NUM_1: *periph = UART1;  return 0;
+    case TUYA_UART_NUM_2: *periph = UART2;  return 0;
+    default:                                return -1;
+    }
+}
 
 static uint8_t tuya_uart_irq_callback_register(TUYA_UART_NUM_E port_id, TUYA_UART_IRQ_CB callback, uint8_t tx_or_rx)
 {
     uint8_t i = 0;
 
     if (tx_or_rx) {// 1 for tx
-        for (i = 0; i < TUYA_UART_NUM_MAX; i++) {
+        for (i = 0; i < GD32_UART_NUM; i++) {
             // uart port already register callback
             if (uart_tx_cbs[i].port_id == port_id) {
                 uart_tx_cbs[i].callback = callback;
@@ -53,7 +153,7 @@ static uint8_t tuya_uart_irq_callback_register(TUYA_UART_NUM_E port_id, TUYA_UAR
             }
         }
     } else {// 0 for rx
-        for (i = 0; i < TUYA_UART_NUM_MAX; i++) {
+        for (i = 0; i < GD32_UART_NUM; i++) {
             // uart port already register callback
             if (uart_rx_cbs[i].port_id == port_id) {
                 uart_rx_cbs[i].callback = callback;
@@ -66,7 +166,7 @@ static uint8_t tuya_uart_irq_callback_register(TUYA_UART_NUM_E port_id, TUYA_UAR
         }
     }
 
-    if (i == TUYA_UART_NUM_MAX) {
+    if (i == GD32_UART_NUM) {
         return FALSE;
     }
 
@@ -86,6 +186,92 @@ static uint8_t tuya_uart_irq_callback_register(TUYA_UART_NUM_E port_id, TUYA_UAR
  *
  * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
  */
+/* Stop mode halts the uart's own clock, so a byte on rx can no longer raise its interrupt.
+ * Route the rx pin to exti as an *event* instead: the edge wakes the core, no isr runs and
+ * the application sees nothing.
+ *
+ * Waking is only half of it - on UART1 and UART2 the byte that did the waking is lost, because
+ * their clock was still off while it arrived, and a protocol over those ports needs a throwaway
+ * first byte. USART0 escapes this, see uart0_lowpower_clock_set(). */
+static void uart_rx_wakeup_arm(TUYA_UART_NUM_E port_id, BOOL_T enable)
+{
+    uint32_t group, pin;
+    uint8_t idx, src;
+
+    switch (port_id) {
+    case TUYA_UART_NUM_0:
+        group = USART0_RX_GPIO;
+        pin = USART0_RX_PIN;
+        break;
+    case TUYA_UART_NUM_1:
+        group = UART1_RX_GPIO;
+        pin = UART1_RX_PIN;
+        break;
+    case TUYA_UART_NUM_2:
+        group = UART2_RX_GPIO;
+        pin = UART2_RX_PIN;
+        break;
+    default:
+        return;
+    }
+
+    idx = (uint8_t)(31 - __CLZ(pin));
+    src = (group == GPIOA) ? EXTI_SOURCE_GPIOA : (group == GPIOB) ? EXTI_SOURCE_GPIOB : EXTI_SOURCE_GPIOC;
+
+    if (!enable) {
+        exti_event_disable((exti_line_enum)BIT(idx));
+        return;
+    }
+
+    rcu_periph_clock_enable(RCU_SYSCFG);
+    syscfg_exti_line_config(src, idx);
+    /* idle is high, so the start bit is the falling edge */
+    exti_init((exti_line_enum)BIT(idx), EXTI_EVENT, EXTI_TRIG_FALLING);
+    exti_interrupt_flag_clear((exti_line_enum)BIT(idx));
+}
+
+/* USART0 alone has a clock source selector (RCU_CFG1_USART0SEL), and IRC16M keeps running in
+ * stop mode. Pointed at it the port goes on shifting bytes into its fifo while the core is
+ * halted, so nothing is lost - the exti event above still does the waking, this only decides
+ * whether there is a byte waiting once it has.
+ *
+ * The cost is accuracy, and it bites twice. IRC16M is trimmed to roughly a percent where the
+ * pll chain is crystal derived, and on top of that the divider gets coarse: at the oversampling
+ * this port resets to, USART_BAUD holds USARTDIV = uclk / (16 * baud) with four fractional bits,
+ * so the quantisation error is about 1/(32 * USARTDIV). Keeping that under half a percent wants
+ * USARTDIV of at least ~6, which off a 16 MHz source means a baud of at most
+ * IRC16M / (16 * 6) - roughly 166k.
+ *
+ * That is far below the 1 Mbps the integer field alone would allow, and the difference is not
+ * academic: the sdk logs at 921600, where USARTDIV falls to 1.08 and the quantisation error
+ * alone reaches 2.9%. Past the cut the accurate clock stays and USART0 behaves like UART1 and
+ * UART2 - woken, first byte gone. Must run before usart_baudrate_set(), which divides whatever
+ * source is selected by then. */
+#define UART0_LP_MIN_USARTDIV   6U
+
+static void uart0_lowpower_clock_set(uint32_t baudrate)
+{
+    if (baudrate == 0 || baudrate > (IRC16M_VALUE / (16U * UART0_LP_MIN_USARTDIV))) {
+        return;
+    }
+
+    rcu_usart0_clock_config(RCU_USART0SRC_IRC16M);
+    /* Selecting the source is only half of it - UESM is what keeps the port, and the oscillator
+     * it asks for, alive once the 1.2V domain goes down. Written here because the port is still
+     * disabled at this point, which is when CTL0 takes it. */
+    usart_wakeup_enable(USART0);
+}
+
+/* The manual pairs the wakeup setup with a check that the receiver really came up (16.3.15).
+ * REA is the hardware's own acknowledgement, so a port that failed to enable is caught here
+ * rather than looking like a port that simply never receives anything. */
+static void uart0_lowpower_check(void)
+{
+    if (RESET == usart_flag_get(USART0, USART_FLAG_REA)) {
+        dbg_print(NOTICE, "usart0: REA clear after enable, deep-sleep rx will not work\r\n");
+    }
+}
+
 OPERATE_RET tkl_uart_init(TUYA_UART_NUM_E port_id, TUYA_UART_BASE_CFG_T *cfg)
 {
     // --- BEGIN: user implements ---
@@ -97,8 +283,13 @@ OPERATE_RET tkl_uart_init(TUYA_UART_NUM_E port_id, TUYA_UART_BASE_CFG_T *cfg)
         usart_periph = USART0;
         rcu_periph_clock_enable(RCU_USART0);
 
-        gpio_af_set(USART0_TX_GPIO, USART0_TX_AF_NUM, USART0_TX_PIN);
-        gpio_af_set(USART0_RX_GPIO, USART0_RX_AF_NUM, USART0_RX_PIN);
+        /* a pin the board remapped is already fully set up by tkl_io_pinmux_config() */
+        if (!uart_tx_is_remapped(port_id)) {
+            gpio_af_set(USART0_TX_GPIO, USART0_TX_AF_NUM, USART0_TX_PIN);
+        }
+        if (!uart_rx_is_remapped(port_id)) {
+            gpio_af_set(USART0_RX_GPIO, USART0_RX_AF_NUM, USART0_RX_PIN);
+        }
         gpio_mode_set(USART0_TX_GPIO, GPIO_MODE_AF, GPIO_PUPD_PULLUP, USART0_TX_PIN);
         gpio_output_options_set(USART0_TX_GPIO, GPIO_OTYPE_PP, GPIO_OSPEED_25MHZ, USART0_TX_PIN);
         gpio_mode_set(USART0_RX_GPIO, GPIO_MODE_AF, GPIO_PUPD_PULLUP, USART0_RX_PIN);
@@ -119,8 +310,13 @@ OPERATE_RET tkl_uart_init(TUYA_UART_NUM_E port_id, TUYA_UART_BASE_CFG_T *cfg)
         usart_periph = UART1;
         rcu_periph_clock_enable(RCU_UART1);
 
-        gpio_af_set(UART1_TX_GPIO, UART1_TX_AF_NUM, UART1_TX_PIN);
-        gpio_af_set(UART1_RX_GPIO, UART1_RX_AF_NUM, UART1_RX_PIN);
+        /* a pin the board remapped is already fully set up by tkl_io_pinmux_config() */
+        if (!uart_tx_is_remapped(port_id)) {
+            gpio_af_set(UART1_TX_GPIO, UART1_TX_AF_NUM, UART1_TX_PIN);
+        }
+        if (!uart_rx_is_remapped(port_id)) {
+            gpio_af_set(UART1_RX_GPIO, UART1_RX_AF_NUM, UART1_RX_PIN);
+        }
         gpio_mode_set(UART1_TX_GPIO, GPIO_MODE_AF, GPIO_PUPD_NONE, UART1_TX_PIN);
         gpio_output_options_set(UART1_TX_GPIO, GPIO_OTYPE_PP, GPIO_OSPEED_25MHZ, UART1_TX_PIN);
         gpio_mode_set(UART1_RX_GPIO, GPIO_MODE_AF, GPIO_PUPD_NONE, UART1_RX_PIN);
@@ -141,8 +337,13 @@ OPERATE_RET tkl_uart_init(TUYA_UART_NUM_E port_id, TUYA_UART_BASE_CFG_T *cfg)
         usart_periph = UART2;
         rcu_periph_clock_enable(RCU_UART2);
 
-        gpio_af_set(UART2_TX_GPIO, UART2_TX_AF_NUM, UART2_TX_PIN);
-        gpio_af_set(UART2_RX_GPIO, UART2_RX_AF_NUM, UART2_RX_PIN);
+        /* a pin the board remapped is already fully set up by tkl_io_pinmux_config() */
+        if (!uart_tx_is_remapped(port_id)) {
+            gpio_af_set(UART2_TX_GPIO, UART2_TX_AF_NUM, UART2_TX_PIN);
+        }
+        if (!uart_rx_is_remapped(port_id)) {
+            gpio_af_set(UART2_RX_GPIO, UART2_RX_AF_NUM, UART2_RX_PIN);
+        }
         gpio_mode_set(UART2_TX_GPIO, GPIO_MODE_AF, GPIO_PUPD_NONE, UART2_TX_PIN);
         gpio_output_options_set(UART2_TX_GPIO, GPIO_OTYPE_PP, GPIO_OSPEED_25MHZ, UART2_TX_PIN);
         gpio_mode_set(UART2_RX_GPIO, GPIO_MODE_AF, GPIO_PUPD_NONE, UART2_RX_PIN);
@@ -167,6 +368,9 @@ OPERATE_RET tkl_uart_init(TUYA_UART_NUM_E port_id, TUYA_UART_BASE_CFG_T *cfg)
     setvbuf(stdout, NULL, _IONBF, 0);
 
     usart_deinit(usart_periph);
+    if (usart_periph == USART0) {
+        uart0_lowpower_clock_set(cfg->baudrate);
+    }
     usart_baudrate_set(usart_periph, cfg->baudrate);
     switch (cfg->parity) {
     case TUYA_UART_PARITY_TYPE_ODD:
@@ -218,6 +422,10 @@ OPERATE_RET tkl_uart_init(TUYA_UART_NUM_E port_id, TUYA_UART_BASE_CFG_T *cfg)
 
     usart_enable(usart_periph);
     usart_command_enable(usart_periph, USART_CMD_RXFCMD);
+    uart_rx_wakeup_arm(port_id, TRUE);
+    if (usart_periph == USART0) {
+        uart0_lowpower_check();
+    }
 
     return OPRT_OK;
     // --- END: user implements ---
@@ -249,6 +457,7 @@ OPERATE_RET tkl_uart_deinit(TUYA_UART_NUM_E port_id)
         return OPRT_OS_ADAPTER_UART_INIT_FAILED;
     }
 
+    uart_rx_wakeup_arm(port_id, FALSE);
     usart_deinit(usart_periph);
 
     return OPRT_OK;
@@ -294,15 +503,24 @@ int tkl_uart_write(TUYA_UART_NUM_E port_id, void *buff, uint16_t len)
         return OPRT_OS_ADAPTER_UART_SEND_FAILED;
     }
 
-    while (1) {
+    if (uart_tx_int_en[port_id & 0xffff]) {
+        /* caller wants the callback, so nothing may block here - keep the clock instead */
+        uart_tx_vote_hold((uint8_t)(port_id & 0xffff));
+    }
+
+    while (len) {
         while (RESET == usart_flag_get(usart_periph, USART_FLAG_TBE));
         usart_data_transmit(usart_periph, *src++);
         len--;
         tx_count++;
-        if (len == 0) {
-            return tx_count;
-        }
     }
+
+    if (!uart_tx_int_en[port_id & 0xffff]) {
+        /* TBE freed the holding register; TC is what says the last bit has left the pin */
+        while (RESET == usart_flag_get(usart_periph, USART_FLAG_TC));
+    }
+
+    return tx_count;
     // --- END: user implements ---
 }
 
@@ -324,7 +542,9 @@ void tuya_uart_irq_hdl(uint32_t uart)
 
     if (RESET != usart_interrupt_flag_get(uart, USART_INT_FLAG_TC)) {
         usart_interrupt_disable(uart, USART_INT_TC);
-        for (i = 0; i < TUYA_UART_NUM_MAX; i++) {
+        /* the wire is idle now, so stop mode is safe again */
+        uart_tx_vote_release((uint8_t)port_id);
+        for (i = 0; i < GD32_UART_NUM; i++) {
             if (uart_tx_cbs[i].port_id == port_id && uart_tx_cbs[i].callback != NULL) {
                 uart_tx_cbs[i].callback(port_id);
                 break;
@@ -336,7 +556,7 @@ void tuya_uart_irq_hdl(uint32_t uart)
 
     if (RESET != usart_interrupt_flag_get(uart, USART_INT_FLAG_RBNE)) {
         usart_interrupt_disable(uart, USART_INT_RBNE);
-        for (i = 0; i < TUYA_UART_NUM_MAX; i++) {
+        for (i = 0; i < GD32_UART_NUM; i++) {
             if (uart_rx_cbs[i].port_id == port_id && uart_rx_cbs[i].callback != NULL) {
                 uart_rx_cbs[i].callback(port_id);
                 break;
@@ -515,10 +735,14 @@ OPERATE_RET tkl_uart_set_tx_int(TUYA_UART_NUM_E port_id, BOOL_T enable)
         return OPRT_OS_ADAPTER_UART_INIT_FAILED;
     }
 
+    uart_tx_int_en[port_id & 0xffff] = enable ? 1 : 0;
+
     if (enable) {
         usart_interrupt_enable(usart_periph, USART_INT_TC);
     } else {
         usart_interrupt_disable(usart_periph, USART_INT_TC);
+        /* whoever was waiting on that isr is not coming, so do not strand the vote */
+        uart_tx_vote_release((uint8_t)(port_id & 0xffff));
     }
 
     return OPRT_OK;
@@ -584,7 +808,38 @@ OPERATE_RET tkl_uart_set_rx_flowctrl(TUYA_UART_NUM_E port_id, BOOL_T enable)
 OPERATE_RET tkl_uart_wait_for_data(TUYA_UART_NUM_E port_id, int timeout_ms)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    uint32_t usart_periph;
+    int waited = 0;
+
+    if (uart_port_to_periph(port_id, &usart_periph)) {
+        return OPRT_INVALID_PARM;
+    }
+
+    /* tkl_uart_read() polls the receive register directly, so readiness is simply
+     * RBNE. timeout_ms < 0 waits forever, 0 is a single non-blocking poll.
+     *
+     * Only meaningful on a port the tal_uart layer has not opened: its rx interrupt
+     * empties the receive register into a ring buffer as bytes arrive, so RBNE is
+     * already clear by the time anyone polls it and this would always time out.
+     * Applications on top of tal_uart should block in tal_uart_read() instead. */
+    for (;;) {
+        if (RESET != usart_flag_get(usart_periph, USART_FLAG_RBNE)) {
+            return OPRT_OK;
+        }
+
+        if (timeout_ms == 0) {
+            return OPRT_TIMEOUT;
+        }
+
+        if (timeout_ms > 0) {
+            if (waited >= timeout_ms) {
+                return OPRT_TIMEOUT;
+            }
+            waited++;
+        }
+
+        sys_ms_sleep(1);
+    }
     // --- END: user implements ---
 }
 
@@ -600,6 +855,42 @@ OPERATE_RET tkl_uart_wait_for_data(TUYA_UART_NUM_E port_id, int timeout_ms)
 OPERATE_RET tkl_uart_ioctl(TUYA_UART_NUM_E port_id, uint32_t cmd, void *arg)
 {
     // --- BEGIN: user implements ---
-    return OPRT_NOT_SUPPORTED;
+    uint32_t usart_periph;
+
+    if (uart_port_to_periph(port_id, &usart_periph)) {
+        return OPRT_INVALID_PARM;
+    }
+
+    switch (cmd) {
+    case TUYA_UART_SUSPEND_CMD:
+        usart_disable(usart_periph);
+        return OPRT_OK;
+
+    case TUYA_UART_RESUME_CMD:
+        usart_enable(usart_periph);
+        return OPRT_OK;
+
+    case TUYA_UART_FLUSH_CMD:
+        /* let anything already in the shift register go out, then drop pending rx */
+        while (RESET == usart_flag_get(usart_periph, USART_FLAG_TC)) {
+        }
+        while (RESET != usart_flag_get(usart_periph, USART_FLAG_RBNE)) {
+            (void)usart_data_receive(usart_periph);
+        }
+        if (RESET != usart_flag_get(usart_periph, USART_FLAG_ORERR)) {
+            usart_flag_clear(usart_periph, USART_FLAG_ORERR);
+        }
+        return OPRT_OK;
+
+    case TUYA_UART_RECONFIG_CMD:
+        if (arg == NULL) {
+            return OPRT_INVALID_PARM;
+        }
+        tkl_uart_deinit(port_id);
+        return tkl_uart_init(port_id, (TUYA_UART_BASE_CFG_T *)arg);
+
+    default:
+        return OPRT_NOT_SUPPORTED;
+    }
     // --- END: user implements ---
 }
