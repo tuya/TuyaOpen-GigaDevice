@@ -248,53 +248,25 @@ uint8_t tkl_adc_width_get(TUYA_ADC_NUM_E port_num)
 uint32_t tkl_adc_ref_voltage_get(TUYA_ADC_NUM_E port_num)
 {
     // --- BEGIN: user implements ---
-    uint32_t voltage;
-    uint16_t adc_value;
-
-    adc_flag_clear(ADC_FLAG_EOC);
-    /* ADC external trigger disable */
-    adc_external_trigger_config(ADC_ROUTINE_CHANNEL, EXTERNAL_TRIGGER_DISABLE);
-    /* ADC channel length config */
-    adc_channel_length_config(ADC_ROUTINE_CHANNEL, 1U);
-    /* ADC temperature sensor channel config */
-    adc_routine_channel_config(0, ADC_CHANNEL_10, ADC_SAMPLETIME_479POINT5);
-
-    adc_resolution_config(ADC_RESOLUTION_12B);
-
-    /* ADC contineous function disable */
-    adc_special_function_config(ADC_CONTINUOUS_MODE, DISABLE);
-    /* ADC scan mode disable */
-    adc_special_function_config(ADC_SCAN_MODE, DISABLE);
-
-    adc_tempsensor_vrefint_enable();
-
-    /* enable ADC interface */
-    adc_enable();
-
-    /* wait for ADC stability */
-    sys_ms_sleep(1);
-
-    /* ADC software trigger enable */
-    adc_software_trigger_enable(ADC_ROUTINE_CHANNEL);
-
-    /* delay a time in milliseconds */
-    sys_ms_sleep(200);
-
-    while(SET != adc_flag_get(ADC_STAT_EOC)){
-    }
-    adc_flag_clear(ADC_STAT_EOC);
-
-    adc_value = adc_routine_data_read();
-
-    adc_tempsensor_vrefint_disable();
-    adc_disable();
-
-    dbg_print(NOTICE, "tkl_adc_ref_voltage_get voltage %d\r\n", adc_value);
-
-    /* value convert */
-    voltage = (uint32_t)(adc_value * ADC_VOL_MAX / 4096);
-
-    return voltage;
+    /* The ADC full-scale reference, in mV -- the same quantity the T5AI adapter
+     * returns (a constant 3300) and the same one tkl_adc_read_voltage() below
+     * normalises raw counts against. Callers use it to convert a millivolt
+     * reading back into a ratio of full scale.
+     *
+     * The previous implementation sampled ADC_CHANNEL_10 (VREFINT) and returned
+     * adc_value * ADC_VOL_MAX / 4096, i.e. the internal bandgap's OWN voltage
+     * (~1.2 V) computed on the assumption that full scale is already 3300 mV.
+     * That is a different physical quantity, ~2.75x smaller, so any caller
+     * normalising against it read high and saturated above ~1.2 V.
+     *
+     * It was also expensive and destructive as a getter: it reprogrammed the
+     * unit onto CHANNEL_10, forced 12-bit resolution, cleared scan/continuous,
+     * slept ~201 ms, spun on EOC with no timeout, and left the ADC disabled --
+     * silently wrecking a channel configuration the caller had already set up.
+     *
+     * If a calibrated VDDA is wanted here later, VREFINT must be used the other
+     * way round: VDDA = VREFINT_nominal * full_scale / vrefint_counts. */
+    return ADC_VOL_MAX;
     // --- END: user implements ---
 }
 
