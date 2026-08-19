@@ -59,7 +59,7 @@ OF SUCH DAMAGE.
 #define IPERF_TASK_MAX              2
 #endif
 
-#define CONFIG_BASECMD
+// #define CONFIG_BASECMD
 
 // #define CONFIG_SPI_I2S
 // #define CONFIG_SOFTAP_PROVISIONING

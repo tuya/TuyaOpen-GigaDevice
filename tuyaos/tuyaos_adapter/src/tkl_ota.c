@@ -20,8 +20,8 @@
 #include "tkl_memory.h"
 #include "tkl_system.h"
 
-#define IMAGE_WRITE_SIZE 1024 // 512
-#define ERASE_SIZE       0x8000 // 32K
+#define IMAGE_WRITE_SIZE 512// 512
+#define ERASE_SIZE       FLASH_PAGE_SIZE // 4K
 
 typedef struct {
     uint32_t start_addr;
@@ -169,7 +169,7 @@ OPERATE_RET tkl_ota_data_process(TUYA_OTA_DATA_T *pack, uint32_t *remain_len)
 
     // write flash
     while (remain_length >= IMAGE_WRITE_SIZE) {
-        if (tkl_flash_write((ug_proc->start_addr + ug_proc->flash_offset),
+        if (raw_flash_write_fast((ug_proc->start_addr + ug_proc->flash_offset),
                             &pack->data[pack->len - remain_length], IMAGE_WRITE_SIZE)) {
             tkl_log_output("Write flash sector failed\r\n");
             return OPRT_OS_ADAPTER_OTA_PROCESS_FAILED;
@@ -183,7 +183,7 @@ OPERATE_RET tkl_ota_data_process(TUYA_OTA_DATA_T *pack, uint32_t *remain_len)
     // write last remain iamge
     if ((ug_proc->recv_data_cnt > (pack->total_len - IMAGE_WRITE_SIZE))
         && (remain_length >= (pack->total_len - ug_proc->recv_data_cnt))) {
-        if (tkl_flash_write((ug_proc->start_addr + ug_proc->flash_offset),
+        if (raw_flash_write_fast((ug_proc->start_addr + ug_proc->flash_offset),
                             &pack->data[pack->len - remain_length], remain_length)) {
             tkl_log_output("Write flash sector failed\r\n");
             return OPRT_OS_ADAPTER_OTA_PROCESS_FAILED;
@@ -193,6 +193,7 @@ OPERATE_RET tkl_ota_data_process(TUYA_OTA_DATA_T *pack, uint32_t *remain_len)
         remain_length = 0;
         *remain_len = 0;
     }
+    sys_ms_sleep(20);
 
     return OPRT_OK;
     // --- END: user implements ---

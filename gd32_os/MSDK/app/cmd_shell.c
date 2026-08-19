@@ -364,12 +364,10 @@ static void cmd_help(int argc, char **argv)
 
     return;
 }
-extern int tuya_iot_reset(void *client);
-extern void *tuya_iot_client_get(void);
+
 static void cmd_reboot(int argc, char **argv)
 {
     printf("\r\n#");
-    // tuya_iot_reset(tuya_iot_client_get());
     SysTimer_SoftwareReset();
 }
 
