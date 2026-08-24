@@ -4298,7 +4298,9 @@ extern int mbedtls_hwpka_flag;
  *
  * Uncomment to set the maximum plaintext size of the incoming I/O buffer.
  */
+#ifndef MBEDTLS_SSL_IN_CONTENT_LEN
 #define MBEDTLS_SSL_IN_CONTENT_LEN              8192 //16384
+#endif
 
 /** \def MBEDTLS_SSL_CID_IN_LEN_MAX
  *
@@ -4348,7 +4350,9 @@ extern int mbedtls_hwpka_flag;
  *
  * Uncomment to set the maximum plaintext size of the outgoing I/O buffer.
  */
+#ifndef MBEDTLS_SSL_OUT_CONTENT_LEN
 #define MBEDTLS_SSL_OUT_CONTENT_LEN             8192 //16384
+#endif
 
 /** \def MBEDTLS_SSL_DTLS_MAX_BUFFERING
  *
