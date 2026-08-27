@@ -55,10 +55,18 @@ TOOLCHAIN_PACKAGES = {
             "cab6f57d58f3ca6931e9204eb582217a7aa4e02004eaa55cb06ec8ef4e529981"
         ),
         "url_cn": (
-            "https://download.nucleisys.com/upload/files/toolchain/gcc/"
-            "nuclei_riscv_newlibc_prebuilt_linux64_2022.04.tar.bz2"
+            "https://images.tuyacn.com/rms-static/"
+            "aae553b0-a208-11f1-9a8d-736398ab592b-1787829353579.tar.bz2"
+            "?tyName=nuclei_riscv_newlibc_prebuilt_linux64_2022.04.tar.bz2"
         ),
         "url_overseas": (
+            "https://github.com/tuya/TuyaOpen-GigaDevice/releases/download/"
+            "tools/nuclei_riscv_newlibc_prebuilt_linux64_2022.04.tar.bz2"
+        ),
+        # Nuclei no longer lists 2022.04 on their download page - it is only
+        # reachable by direct URL, which is why the package is mirrored above.
+        # Kept as a last resort in case a mirror cannot be reached.
+        "url_fallback": (
             "https://download.nucleisys.com/upload/files/toolchain/gcc/"
             "nuclei_riscv_newlibc_prebuilt_linux64_2022.04.tar.bz2"
         ),
@@ -93,13 +101,19 @@ def get_toolchain_package_info():
         print("##############################")
         return {}
 
+    # nearest mirror first, then the other one, then whatever upstream host the
+    # package originally came from; duplicates dropped, order kept
     if country_code == "China":
-        url = package["url_cn"]
+        urls = [package["url_cn"], package["url_overseas"]]
     else:
-        url = package["url_overseas"]
+        urls = [package["url_overseas"], package["url_cn"]]
+    if package.get("url_fallback"):
+        urls.append(package["url_fallback"])
+    urls = list(dict.fromkeys(urls))
 
     package_info = {
-        "url": url,
+        "url": urls[0],
+        "urls": urls,
         "name": package["name"],
         "size": package["size"],
         "sha256": package["sha256"],
@@ -153,7 +167,7 @@ def _download_from_url(url, download_file):
 
 
 def wget_toolchain_package(toolchain_root, package_info) -> bool:
-    url = package_info["url"]
+    urls = package_info.get("urls") or [package_info["url"]]
     name = package_info["name"]
     download_file = os.path.join(toolchain_root, name)
 
@@ -161,11 +175,14 @@ def wget_toolchain_package(toolchain_root, package_info) -> bool:
         print(f"[Toolchain package is exiets]: {download_file}")
         return True
 
-    print(f"[Downloading package]: {url}")
-    if not _download_from_url(url, download_file):
-        return False
+    for idx, url in enumerate(urls):
+        print(f"[Downloading package]: {url}")
+        if _download_from_url(url, download_file):
+            return True
+        if idx + 1 < len(urls):
+            print(f"[Trying next source]: {idx + 2}/{len(urls)}")
 
-    return True
+    return False
 
 
 def check_toolchain_package(toolchain_root, package_info) -> bool:
