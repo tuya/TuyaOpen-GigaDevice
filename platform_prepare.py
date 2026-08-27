@@ -3,16 +3,14 @@
 
 import os
 import sys
-import platform
 
 from tools.download_toolchain import download_toolchain
 
 
 def main():
-    if not platform.system().lower().startswith("windows"):
-        print("Error: GD32 toolchain prepare only supports Windows.")
-        sys.exit(1)
-
+    # Which hosts are supported is decided by whether a prebuilt toolchain
+    # package exists for them - see TOOLCHAIN_PACKAGES in
+    # tools/download_toolchain.py, which reports a clear error if not.
     root = os.path.dirname(os.path.abspath(__file__))
     platform_root = os.path.abspath(os.path.join(root, ".."))
     toolchain_root = os.path.join(platform_root, "tools")

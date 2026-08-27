@@ -1,0 +1,12 @@
+# These scripts are executed by the build on Linux. A CRLF shebang makes the
+# kernel report "bad interpreter: /bin/bash^M", so pin them to LF whatever the
+# checkout platform does.
+#
+# Listed one by one rather than as *.sh on purpose: the vendored third-party
+# trees (mbedtls, azure-iot, libcoap, wpa_supplicant) carry hundreds of shell
+# scripts that the build never runs, and a blanket rule would renormalise them
+# the moment anything touches them.
+gd32_os/cmake_build.sh                    text eol=lf
+gd32_os/MBL/project/mbl_afterbuild.sh     text eol=lf
+gd32_os/MSDK/projects/image_prebuild.sh   text eol=lf
+gd32_os/MSDK/projects/image_afterbuild.sh text eol=lf

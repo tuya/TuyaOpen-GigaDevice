@@ -39,7 +39,7 @@ IMGTOOL=${ROOT}/scripts/imgtool/imgtool.py
 HEXTOOL=${ROOT}/scripts/imgtool/hextool.py
 GENTOOL=${ROOT}/scripts/imgtool/gentool.py
 AESTOOL=${ROOT}/scripts/imgtool/aestool.py
-SREC_CAT=${ROOT}/scripts/imgtool/srec_cat.exe
+SREC_CAT=srec_cat
 OUTPUT_PATH=${ROOT}/scripts/images
 DOWNLOAD_BIN=${OUTPUT_PATH}/mbl-sys${AES_SUFFIX}.bin
 if [ ! -d "${OUTPUT_PATH}" ]; then

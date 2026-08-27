@@ -147,7 +147,7 @@ elseif(${CMAKE_HOST_UNIX})
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJDUMP} --source --all-headers --demangle --line-numbers --wide ${TARGET_EXE}.elf > ${TARGET_EXE}.lst
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJCOPY} -O ihex  ${TARGET_EXE}.elf  ${TARGET_EXE}.hex
         COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${CMAKE_OBJCOPY} -O binary  ${TARGET_EXE}.elf  ${TARGET_EXE}.bin
-        COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${TARGET_PROJECT_DIR}/image_afterbuild.sh  ${CROSS_COMPILE}- ECDSA256 CERT ${PROJECT_SOURCE_DIR}/tools/xpack-openocd-0.11.0-3_linux/bin ${PROJECT_SOURCE_DIR} \"\"
+        COMMAND  cd ${TARGET_PROJECT_DIR}/cmake/output/bin && ${TARGET_PROJECT_DIR}/image_afterbuild.sh  ${CROSS_COMPILE}- ECDSA256 CERT ${TOOLCHAIN_DIR} ${PROJECT_SOURCE_DIR} \"\" ${CONFIG_PROJECT_NAME}
         COMMENT "Building ${TARGET_EXE}"
     )
 else()

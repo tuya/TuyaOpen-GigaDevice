@@ -5,6 +5,7 @@ WITH_CERT=$3
 OPENOCD_PATH=$4
 ROOT=$5
 AESK=$6
+TARGET=$7
 
 if [ -n "${OPENOCD_PATH}" ] && [ -x "${OPENOCD_PATH}/bin/${TOOLKIT}objcopy" ]; then
     TOOLKIT="${OPENOCD_PATH}/bin/${TOOLKIT}"
@@ -12,7 +13,12 @@ fi
 
 ALGO_HASH=SHA256
 
-TARGET=MSDK
+# TuyaOpen renames the image after CONFIG_PROJECT_NAME and passes it as $7 -
+# the .bat has taken it from %7 all along. Keep MSDK for a bare SDK build that
+# still calls this script with six arguments.
+if [ -z "${TARGET}" ]; then
+    TARGET=MSDK
+fi
 
 if [[ ${ALGO_SIGN} != 'ECDSA256' && ${ALGO_SIGN}  != 'ED25519' ]]; then
     echo ALGO_SIGN must be 'ECDSA256' or 'ED25519'!
@@ -103,6 +109,13 @@ if [[ ${mbl_offset} = "0x0" ]];then
     fi
 
     if [[ -e "${OUTPUT_PATH}/MBL.bin" ]]; then
+        # The Windows script ships scripts/imgtool/srec_cat.exe; on Linux this
+        # comes from the srecord package and is easy to be missing.
+        if ! command -v "${SREC_CAT}" > /dev/null 2>&1; then
+            echo "Error: ${SREC_CAT} not found, cannot combine image-all.bin."
+            echo "       Install it, e.g. sudo apt install srecord"
+            exit 1
+        fi
         ${SREC_CAT} "${OUTPUT_PATH}/MBL.bin" -Binary -offset "0" \
                  ${TARGET}.bin -Binary -offset "${image0_offset}" \
                  -fill 0xFF ${mbl_len} "${image0_offset}" \
