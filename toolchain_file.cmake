@@ -39,8 +39,15 @@ if(NOT DEFINED PLATFORM_PATH OR "${PLATFORM_PATH}" STREQUAL "")
     set(PLATFORM_PATH "${CMAKE_CURRENT_LIST_DIR}")
 endif()
 
-# platform_prepare.py unpacks the toolchain into platform/tools/<folder>/gcc
-set(TOOLCHAIN_DIR "${PLATFORM_PATH}/../tools/nuclei_riscv_newlibc_prebuilt_win32_2022.04/gcc"
+# platform_prepare.py unpacks the toolchain into platform/tools/<folder>/gcc,
+# and the package - hence the folder - differs per host; keep the names in step
+# with TOOLCHAIN_PACKAGES in tools/download_toolchain.py.
+if(CMAKE_HOST_WIN32)
+    set(_TC_FOLDER "nuclei_riscv_newlibc_prebuilt_win32_2022.04")
+else()
+    set(_TC_FOLDER "nuclei_riscv_newlibc_prebuilt_linux64_2022.04")
+endif()
+set(TOOLCHAIN_DIR "${PLATFORM_PATH}/../tools/${_TC_FOLDER}/gcc"
     CACHE PATH "RISC-V Nuclei GCC toolchain root")
 set(COMPILE_PREX "${TOOLCHAIN_DIR}/bin/riscv-nuclei-elf-")
 

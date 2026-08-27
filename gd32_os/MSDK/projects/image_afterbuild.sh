@@ -46,7 +46,13 @@ IMGTOOL=${ROOT}/scripts/imgtool/imgtool.py
 HEXTOOL=${ROOT}/scripts/imgtool/hextool.py
 GENTOOL=${ROOT}/scripts/imgtool/gentool.py
 AESTOOL=${ROOT}/scripts/imgtool/aestool.py
+# The Windows scripts use the vendored scripts/imgtool/srec_cat.exe. On Linux
+# srec_cat comes from the srecord package and is usually absent, so fall back to
+# the Python stand-in next to it, which covers the calls made below.
 SREC_CAT=srec_cat
+if ! command -v "${SREC_CAT}" > /dev/null 2>&1; then
+    SREC_CAT="${ROOT}/scripts/imgtool/srec_cat_lite.py"
+fi
 OUTPUT_PATH=${ROOT}/scripts/images
 DOWNLOAD_BIN=${OUTPUT_PATH}/image-ota-sign${AES_SUFFIX}.bin
 
@@ -109,11 +115,8 @@ if [[ ${mbl_offset} = "0x0" ]];then
     fi
 
     if [[ -e "${OUTPUT_PATH}/MBL.bin" ]]; then
-        # The Windows script ships scripts/imgtool/srec_cat.exe; on Linux this
-        # comes from the srecord package and is easy to be missing.
-        if ! command -v "${SREC_CAT}" > /dev/null 2>&1; then
+        if ! command -v "${SREC_CAT}" > /dev/null 2>&1 && [ ! -x "${SREC_CAT}" ]; then
             echo "Error: ${SREC_CAT} not found, cannot combine image-all.bin."
-            echo "       Install it, e.g. sudo apt install srecord"
             exit 1
         fi
         ${SREC_CAT} "${OUTPUT_PATH}/MBL.bin" -Binary -offset "0" \
