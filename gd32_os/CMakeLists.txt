@@ -9,8 +9,19 @@ set(CONFIG_MBEDTLS_VERSION         "3.6.2"       CACHE STRING    "Select which m
 # set(CONFIG_OS                      "RTTHREAD"    CACHE STRING    "Select which OS")
 set(CONFIG_STATIC_LIB_BUILDED         ON            CACHE BOOL      "Whether static lib builded, like wlan, iperf3 lib")
 
-include(${CMAKE_TOOLCHAIN_FILE})
+# Own project() means own directory scope: re-apply the SDK toolchain flags.
+include(${PLATFORM_PATH}/gd32_sdk_toolchain.cmake)
 toolchain_reload_compiler()
+
+# CONFIG_OS is only known here (set as a cache entry a few lines up), which is
+# why this lives in the SDK subtree rather than in the toolchain file.
+if(CONFIG_OS STREQUAL "FREERTOS")
+    set(PLATFORM_OS_FREERTOS ON)
+    add_compile_definitions(PLATFORM_OS_FREERTOS)
+elseif(CONFIG_OS STREQUAL "RTTHREAD")
+    set(PLATFORM_OS_RTTHREAD ON)
+    add_compile_definitions(PLATFORM_OS_RTTHREAD)
+endif()
 
 include_directories(
     config
