@@ -443,8 +443,11 @@ def flash_firmware(
         _log(logger, "info", f"chip id {chip.hex().upper()}")
 
         result["stage"] = "erase"
-        _log(logger, "info", "erasing flash ...")
-        loader.erase(flash_addr, len(image), chip_erase=True)
+        # Range erase, not chip erase: a full wipe also takes the KV partition,
+        # which is where the device authorization (UUID/AUTHKEY) lives.
+        _log(logger, "info",
+             f"erasing {len(image)} bytes at 0x{flash_addr:08X} ...")
+        loader.erase(flash_addr, len(image), chip_erase=False)
 
         result["stage"] = "download"
         loader.set_baudrate(baudrate)
