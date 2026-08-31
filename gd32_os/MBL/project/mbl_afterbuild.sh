@@ -39,7 +39,13 @@ IMGTOOL=${ROOT}/scripts/imgtool/imgtool.py
 HEXTOOL=${ROOT}/scripts/imgtool/hextool.py
 GENTOOL=${ROOT}/scripts/imgtool/gentool.py
 AESTOOL=${ROOT}/scripts/imgtool/aestool.py
-SREC_CAT=${ROOT}/scripts/imgtool/srec_cat.exe
+# The Windows scripts use the vendored scripts/imgtool/srec_cat.exe. On Linux
+# srec_cat comes from the srecord package and is usually absent, so fall back to
+# the Python stand-in next to it, which covers the calls made below.
+SREC_CAT=srec_cat
+if ! command -v "${SREC_CAT}" > /dev/null 2>&1; then
+    SREC_CAT="${ROOT}/scripts/imgtool/srec_cat_lite.py"
+fi
 OUTPUT_PATH=${ROOT}/scripts/images
 DOWNLOAD_BIN=${OUTPUT_PATH}/mbl-sys${AES_SUFFIX}.bin
 if [ ! -d "${OUTPUT_PATH}" ]; then

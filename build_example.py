@@ -151,8 +151,10 @@ def main():
     try:
         os.makedirs("build", exist_ok=True)
 
-        # Prefer Ninja for faster incremental builds; use updated toolchain file
-        toolchain_path = os.path.join(os.getcwd(), "toolchain_file.cmake")
+        # Prefer Ninja for faster incremental builds. The SDK build uses the
+        # SDK's own toolchain; toolchain_file.cmake is TuyaOpen's contract file
+        # and serves TuyaOpen's library build only.
+        toolchain_path = os.path.join(os.getcwd(), "gd32_sdk_toolchain.cmake")
         cmake_command = [
             "cmake", "-S", ".", "-B", "build", "-G", "Ninja",
             f"-DBUILD_PARAM_PATH={build_param_path}", f"-DCMAKE_TOOLCHAIN_FILE={toolchain_path}"

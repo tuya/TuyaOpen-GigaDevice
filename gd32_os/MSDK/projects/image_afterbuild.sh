@@ -5,6 +5,7 @@ WITH_CERT=$3
 OPENOCD_PATH=$4
 ROOT=$5
 AESK=$6
+TARGET=$7
 
 if [ -n "${OPENOCD_PATH}" ] && [ -x "${OPENOCD_PATH}/bin/${TOOLKIT}objcopy" ]; then
     TOOLKIT="${OPENOCD_PATH}/bin/${TOOLKIT}"
@@ -12,7 +13,12 @@ fi
 
 ALGO_HASH=SHA256
 
-TARGET=MSDK
+# TuyaOpen renames the image after CONFIG_PROJECT_NAME and passes it as $7 -
+# the .bat has taken it from %7 all along. Keep MSDK for a bare SDK build that
+# still calls this script with six arguments.
+if [ -z "${TARGET}" ]; then
+    TARGET=MSDK
+fi
 
 if [[ ${ALGO_SIGN} != 'ECDSA256' && ${ALGO_SIGN}  != 'ED25519' ]]; then
     echo ALGO_SIGN must be 'ECDSA256' or 'ED25519'!
@@ -40,7 +46,13 @@ IMGTOOL=${ROOT}/scripts/imgtool/imgtool.py
 HEXTOOL=${ROOT}/scripts/imgtool/hextool.py
 GENTOOL=${ROOT}/scripts/imgtool/gentool.py
 AESTOOL=${ROOT}/scripts/imgtool/aestool.py
+# The Windows scripts use the vendored scripts/imgtool/srec_cat.exe. On Linux
+# srec_cat comes from the srecord package and is usually absent, so fall back to
+# the Python stand-in next to it, which covers the calls made below.
 SREC_CAT=srec_cat
+if ! command -v "${SREC_CAT}" > /dev/null 2>&1; then
+    SREC_CAT="${ROOT}/scripts/imgtool/srec_cat_lite.py"
+fi
 OUTPUT_PATH=${ROOT}/scripts/images
 DOWNLOAD_BIN=${OUTPUT_PATH}/image-ota-sign${AES_SUFFIX}.bin
 
@@ -103,6 +115,10 @@ if [[ ${mbl_offset} = "0x0" ]];then
     fi
 
     if [[ -e "${OUTPUT_PATH}/MBL.bin" ]]; then
+        if ! command -v "${SREC_CAT}" > /dev/null 2>&1 && [ ! -x "${SREC_CAT}" ]; then
+            echo "Error: ${SREC_CAT} not found, cannot combine image-all.bin."
+            exit 1
+        fi
         ${SREC_CAT} "${OUTPUT_PATH}/MBL.bin" -Binary -offset "0" \
                  ${TARGET}.bin -Binary -offset "${image0_offset}" \
                  -fill 0xFF ${mbl_len} "${image0_offset}" \

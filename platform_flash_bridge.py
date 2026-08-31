@@ -158,19 +158,27 @@ def _normalize_device(device: Optional[str]) -> str:
     return _CHIP_TO_DEVICE.get(key, str(device).strip())
 
 
-def _load_gd32_mass_flash():
-    script_path = Path(__file__).resolve().parent / "tools" / "gd32_mass_flash.py"
-    if not script_path.is_file():
-        raise FileNotFoundError(f"Cannot find gd32_mass_flash.py: {script_path}")
+def _load_flash_module():
+    """Pick the flashing back end for this host.
 
-    spec = importlib.util.spec_from_file_location("gd32_mass_flash", script_path)
+    Windows drives GD32MassProductionTool_CMD.exe. That tool enumerates ports
+    through WMI and addresses them as COMx, so everywhere else uses
+    gd32_isp_flash.py, which speaks the same ROM-ISP and xmodem protocols over
+    pyserial and loads the tool's own SRAM loader.
+    """
+    name = "gd32_mass_flash" if os.name == "nt" else "gd32_isp_flash"
+    script_path = Path(__file__).resolve().parent / "tools" / f"{name}.py"
+    if not script_path.is_file():
+        raise FileNotFoundError(f"Cannot find {name}.py: {script_path}")
+
+    spec = importlib.util.spec_from_file_location(name, script_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load module: {script_path}")
 
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if not callable(getattr(module, "flash_firmware", None)):
-        raise ImportError("gd32_mass_flash.py has no flash_firmware()")
+        raise ImportError(f"{name}.py has no flash_firmware()")
     return module
 
 
@@ -185,8 +193,8 @@ def flash_firmware(
 ) -> Dict[str, Any]:
     """Low-level flash API used by platform_flash() and CLI."""
     normalized = _normalize_device(device)
-    gd32_mass_flash = _load_gd32_mass_flash()
-    return gd32_mass_flash.flash_firmware(
+    flash_module = _load_flash_module()
+    return flash_module.flash_firmware(
         device=normalized,
         port=port,
         baud=baud,

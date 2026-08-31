@@ -10,16 +10,24 @@ else()
     message(FATAL_ERROR "${BUILD_PARAM_PATH}/build_param.cmake not found")
 endif()
 
-# Provide PLATFORM_PATH expected by merged_toolchain (assume this CMakeLists sits in platform/GD32)
+# Provide PLATFORM_PATH expected by the toolchain files (this CMakeLists sits in platform/GD32)
 set(PLATFORM_PATH ${CMAKE_CURRENT_LIST_DIR})
 
+# build_example.py always passes -DCMAKE_TOOLCHAIN_FILE; the fallback is for a
+# bare `cmake -S . -B build` run by hand. Note this is the SDK's toolchain, not
+# toolchain_file.cmake - that one belongs to TuyaOpen's own library build.
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-    # Auto use merged toolchain unless user specified another
-    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_LIST_DIR}/merged_toolchain.cmake CACHE FILEPATH "Merged GD32 toolchain file" FORCE)
+    set(CMAKE_TOOLCHAIN_FILE ${CMAKE_CURRENT_LIST_DIR}/gd32_sdk_toolchain.cmake CACHE FILEPATH "GD32 SDK toolchain file" FORCE)
 endif()
 
-include(${CMAKE_TOOLCHAIN_FILE})
-toolchain_reload_compiler()
+# Included here as well as by project(): the toolchain_* macros and the flag
+# lists have to exist before project() runs. The file is idempotent.
+include(${CMAKE_CURRENT_LIST_DIR}/gd32_sdk_toolchain.cmake)
+
+# Tells the vendor SDK and the adapter they are being built as part of TuyaOS
+# rather than as a standalone GigaDevice sample. Inherited by every
+# subdirectory, gd32_os included.
+add_compile_definitions(TUYAOS_SUPPORT)
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
