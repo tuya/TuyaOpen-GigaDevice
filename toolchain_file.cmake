@@ -60,9 +60,27 @@ endif()
 set(CMAKE_C_COMPILER   "${COMPILE_PREX}gcc${_TC_EXE}")
 set(CMAKE_CXX_COMPILER "${COMPILE_PREX}g++${_TC_EXE}")
 set(CMAKE_ASM_COMPILER "${COMPILE_PREX}gcc${_TC_EXE}")
-set(CMAKE_AR           "${COMPILE_PREX}ar${_TC_EXE}")
-set(CMAKE_RANLIB       "${COMPILE_PREX}ranlib${_TC_EXE}")
-set(CMAKE_STRIP        "${COMPILE_PREX}strip${_TC_EXE}")
+
+# binutils do not come from gcc/bin on Windows: the package's binutils (2.36.1)
+# auto-load gcc/lib/bfd-plugins at startup, and that directory wrongly holds
+# libdep.dll.a - the ar-format import library for the libdep.dll plugin, not a
+# loadable image - so the loader kills the prefixed ar/ranlib/strip with
+# 0xc000012f ("Bad Image") before they do any work. The byte-identical
+# unprefixed copies under gcc/riscv-nuclei-elf/bin resolve a plugin directory
+# that does not exist and run clean, so use those on Windows. On Linux
+# libdep.so is a proper shared object and the gcc/bin tools are used as-is.
+# The compilers never scan bfd-plugins and stay in gcc/bin on both hosts.
+if(CMAKE_HOST_WIN32)
+    set(_BINUTILS_BIN "${TOOLCHAIN_DIR}/riscv-nuclei-elf/bin")
+    set(_BINUTILS_PRE "")
+else()
+    set(_BINUTILS_BIN "${TOOLCHAIN_DIR}/bin")
+    set(_BINUTILS_PRE "riscv-nuclei-elf-")
+endif()
+
+set(CMAKE_AR           "${_BINUTILS_BIN}/${_BINUTILS_PRE}ar${_TC_EXE}")
+set(CMAKE_RANLIB       "${_BINUTILS_BIN}/${_BINUTILS_PRE}ranlib${_TC_EXE}")
+set(CMAKE_STRIP        "${_BINUTILS_BIN}/${_BINUTILS_PRE}strip${_TC_EXE}")
 
 # A missing toolchain otherwise surfaces as a wall of "command not found" from
 # ninja; say it once, up front, and point at the script that installs it.

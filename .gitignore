@@ -18,6 +18,7 @@ tuyadb/
 default.json
 allconfig
 
+gd32_os/.app
 gd32_os/MSDK/app/_build_date.h
 gd32_os/MSDK/projects/cmake/output
 gd32_os/MBL/project/cmake/bin
