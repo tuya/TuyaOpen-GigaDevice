@@ -158,15 +158,8 @@ def _normalize_device(device: Optional[str]) -> str:
     return _CHIP_TO_DEVICE.get(key, str(device).strip())
 
 
-def _load_flash_module():
-    """Pick the flashing back end for this host.
-
-    Windows drives GD32MassProductionTool_CMD.exe. That tool enumerates ports
-    through WMI and addresses them as COMx, so everywhere else uses
-    gd32_isp_flash.py, which speaks the same ROM-ISP and xmodem protocols over
-    pyserial and loads the tool's own SRAM loader.
-    """
-    name = "gd32_mass_flash" if os.name == "nt" else "gd32_isp_flash"
+def _load_named_flash_module(name: str):
+    """Load one GD32 flashing back end by module name."""
     script_path = Path(__file__).resolve().parent / "tools" / f"{name}.py"
     if not script_path.is_file():
         raise FileNotFoundError(f"Cannot find {name}.py: {script_path}")
@@ -182,6 +175,36 @@ def _load_flash_module():
     return module
 
 
+def _load_flash_module():
+    """Pick the preferred flashing back end for this host.
+
+    Windows drives GD32MassProductionTool_CMD.exe. That tool enumerates ports
+    through WMI and addresses them as COMx, so everywhere else uses
+    gd32_isp_flash.py, which speaks the same ROM-ISP and xmodem protocols over
+    pyserial and loads the tool's own SRAM loader.
+    """
+    name = "gd32_mass_flash" if os.name == "nt" else "gd32_isp_flash"
+    return _load_named_flash_module(name)
+
+
+def _mass_tool_failed_before_download(result: Dict[str, Any]) -> bool:
+    """Whether retrying with pyserial is safe after a mass-tool failure.
+
+    The Windows tool first runs ``scan`` and ``specify`` before its
+    ``download`` command. A crash in either step cannot have written flash.
+    Once the download command has started, retrying would be unsafe because
+    the first attempt may already have erased or programmed part of the chip.
+    """
+    if result.get("success"):
+        return False
+
+    stage = str(result.get("stage") or "")
+    download = result.get("download")
+    if isinstance(download, dict):
+        return download.get("download") is None
+    return stage in ("scan", "specify")
+
+
 def flash_firmware(
     device: Optional[str],
     port: Optional[str],
@@ -194,7 +217,7 @@ def flash_firmware(
     """Low-level flash API used by platform_flash() and CLI."""
     normalized = _normalize_device(device)
     flash_module = _load_flash_module()
-    return flash_module.flash_firmware(
+    result = flash_module.flash_firmware(
         device=normalized,
         port=port,
         baud=baud,
@@ -203,6 +226,41 @@ def flash_firmware(
         logger=logger,
         **kwargs,
     )
+
+    if os.name != "nt" or not _mass_tool_failed_before_download(result):
+        return result
+
+    reason = result.get("message") or "mass-production tool failed before download"
+    if logger:
+        logger.warning(
+            "GD32 mass-production tool failed before download; "
+            f"retrying with gd32_isp_flash.py: {reason}"
+        )
+
+    try:
+        fallback_module = _load_named_flash_module("gd32_isp_flash")
+        fallback_result = fallback_module.flash_firmware(
+            device=normalized,
+            port=port,
+            baud=baud,
+            start=start,
+            binfile=binfile,
+            logger=logger,
+            **kwargs,
+        )
+    except Exception as exc:
+        result["fallback_error"] = str(exc)
+        return result
+
+    if isinstance(fallback_result, dict):
+        fallback_result = dict(fallback_result)
+        fallback_result["fallback"] = {
+            "from": "gd32_mass_flash",
+            "to": "gd32_isp_flash",
+            "reason_stage": result.get("stage"),
+            "reason": reason,
+        }
+    return fallback_result
 
 
 def platform_flash(using_data, binfile, port, baud, boards_root, logger):
