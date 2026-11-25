@@ -187,24 +187,6 @@ def _load_flash_module():
     return _load_named_flash_module(name)
 
 
-def _mass_tool_failed_before_download(result: Dict[str, Any]) -> bool:
-    """Whether retrying with pyserial is safe after a mass-tool failure.
-
-    The Windows tool first runs ``scan`` and ``specify`` before its
-    ``download`` command. A crash in either step cannot have written flash.
-    Once the download command has started, retrying would be unsafe because
-    the first attempt may already have erased or programmed part of the chip.
-    """
-    if result.get("success"):
-        return False
-
-    stage = str(result.get("stage") or "")
-    download = result.get("download")
-    if isinstance(download, dict):
-        return download.get("download") is None
-    return stage in ("scan", "specify")
-
-
 def flash_firmware(
     device: Optional[str],
     port: Optional[str],
@@ -227,7 +209,7 @@ def flash_firmware(
         **kwargs,
     )
 
-    if os.name != "nt" or not _mass_tool_failed_before_download(result):
+    if os.name != "nt" or result.get("success") or not result.get("fallback_allowed"):
         return result
 
     reason = result.get("message") or "mass-production tool failed before download"
@@ -239,11 +221,12 @@ def flash_firmware(
 
     try:
         fallback_module = _load_named_flash_module("gd32_isp_flash")
+        # The mass tool always uses the default flash address.
         fallback_result = fallback_module.flash_firmware(
             device=normalized,
             port=port,
             baud=baud,
-            start=start,
+            start=None,
             binfile=binfile,
             logger=logger,
             **kwargs,

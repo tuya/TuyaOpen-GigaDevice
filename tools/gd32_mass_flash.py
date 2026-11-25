@@ -40,7 +40,7 @@ import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
@@ -183,6 +183,8 @@ def _run_cmd(
     cmd: list[str],
     cwd: Path,
     logger: Optional[logging.Logger],
+    *,
+    on_started: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """Run one command and collect process details."""
     _log(logger, "info", f"Run command: {_format_cmd_for_log(cmd)}")
@@ -197,6 +199,9 @@ def _run_cmd(
         errors="replace",
         bufsize=1,
     )
+    if on_started is not None:
+        on_started()
+
     stdout_chunks: List[str] = []
     stderr_chunks: List[str] = []
 
@@ -426,6 +431,8 @@ def flash_firmware(
         A structured dict containing flashing result and command outputs.
 
         - ``scan``: subprocess result for the ``scan`` step, or None if not run
+        - ``fallback_allowed``: True after reaching scan and until the
+          download process starts
         - ``ignore``: subprocess result for ``ignore <other_coms ...>``,
           None if skipped (no other COM detected) or not reached
         - ``download``: None (no tool steps ran) or a dict with:
@@ -449,6 +456,7 @@ def flash_firmware(
         "start": start,
         "binfile": binfile,
         "scan": None,
+        "fallback_allowed": False,
         "ignore": None,
         "download": None,
         "cleanup": None,
@@ -508,6 +516,7 @@ def flash_firmware(
         target_port = _normalize_port(port)
 
         result["stage"] = "scan"
+        result["fallback_allowed"] = True
         scan_cmd = [str(cmd_tool), "scan"]
         scan_ret = _run_cmd(scan_cmd, cmd_cwd, logger)
         result["scan"] = scan_ret
@@ -588,7 +597,13 @@ def flash_firmware(
             str(image_path),
             DEFAULT_ERASE_OPTION,
         ]
-        download_ret = _run_cmd(download_cmd, cmd_cwd, logger)
+
+        def mark_download_started() -> None:
+            result["fallback_allowed"] = False
+
+        download_ret = _run_cmd(
+            download_cmd, cmd_cwd, logger, on_started=mark_download_started
+        )
         download_steps["download"] = download_ret
 
         if download_ret["exit_code"] == 0:
