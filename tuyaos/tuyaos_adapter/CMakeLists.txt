@@ -39,6 +39,7 @@ file(GLOB ADAPTER_CORE_SRC
     src/tkl_symmetry.c
     src/tkl_display.c
     tuyaopen/tuyaopen_license.c
+    tuyaopen/netif_ops.c
 )
 
 file(GLOB INIT_SRC
