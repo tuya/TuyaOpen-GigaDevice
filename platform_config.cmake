@@ -20,6 +20,10 @@ set(PLATFORM_PUBINC_2
     ${PLATFORM_PATH}/gd32_os/MSDK/rtos/rtos_wrapper
     ${PLATFORM_PATH}/gd32_os/MSDK/app
     ${PLATFORM_PATH}/gd32_os/MSDK/app/mm_app
+    ${PLATFORM_PATH}/gd32_os/MSDK/macsw/export
+    ${PLATFORM_PATH}/gd32_os/MSDK/plf/riscv/arch/compiler
+    ${PLATFORM_PATH}/gd32_os/MSDK/lwip/lwip-2.2.0/port
+    ${PLATFORM_PATH}/gd32_os/MSDK/lwip/lwip-2.2.0/src/include
 )
 
 set(PLATFORM_PUBINC
