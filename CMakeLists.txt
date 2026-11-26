@@ -204,7 +204,7 @@ if(TARGET ${TARGET_EXE})
         set(_ADAPTER_TARGET_LIST ${_ADAPTER_SUBLIBS})
     endif()
 
-    foreach(libname tuyaapp tuyaos freertos rtos riscv riscv_api bsp fatfs wifi_mgmt gd32vw55x_peripheral util lwIP mbedtls ble_app_profile ${_ADAPTER_TARGET_LIST})
+    foreach(libname tuyaapp tuyaopen freertos rtos riscv riscv_api bsp fatfs wifi_mgmt gd32vw55x_peripheral util lwIP mbedtls ble_app_profile ${_ADAPTER_TARGET_LIST})
         if(TARGET ${libname})
             get_target_property(_lib_type ${libname} TYPE)
             if(_lib_type STREQUAL "STATIC_LIBRARY" OR _lib_type STREQUAL "SHARED_LIBRARY" OR _lib_type STREQUAL "MODULE_LIBRARY")
@@ -230,7 +230,7 @@ if(TARGET ${TARGET_EXE})
             string(REPLACE " " ";" _PREBUILT_LIBS_LIST "${PLATFORM_NEED_LIBS}")
             foreach(_pl ${_PREBUILT_LIBS_LIST})
                 # Use archive file paths so Ninja tracks mtime and relinks when
-                # libtuyaapp.a / libtuyaos.a are rebuilt in the Open SDK .build tree.
+                # libtuyaapp.a / libtuyaopen.a are rebuilt in the Open SDK .build tree.
                 set(_prebuilt "${OPEN_LIBS_DIR}/lib${_pl}.a")
                 if(EXISTS "${_prebuilt}")
                     list(APPEND _GROUP_ARCHIVES "${_prebuilt}")
